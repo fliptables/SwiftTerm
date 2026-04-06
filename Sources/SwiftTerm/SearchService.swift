@@ -7,7 +7,7 @@
 
 import Foundation
 
-final class SearchService {
+public final class SearchService {
     private enum Constants {
         static let defaultHighlightLimit = 1000
     }
@@ -18,7 +18,7 @@ final class SearchService {
     private let engine: SearchEngine
     private var lastSelection: SearchSelection?
 
-    private(set) var lastResult: SearchResult?
+    public private(set) var lastResult: SearchResult?
 
     init (terminal: Terminal) {
         self.terminal = terminal
@@ -32,13 +32,13 @@ final class SearchService {
      * The cache should be invalidated when either the content of the buffer or the buffer dimensions change
      * because the snapshot has direct mappings to buffer line and locations.
     */
-    func invalidate () {
+    public func invalidate () {
         lineCache.invalidate()
         lastResult = nil
         lastSelection = nil
     }
 
-    func reset () {
+    public func reset () {
         lineCache.invalidate()
         state.reset()
         lastResult = nil
@@ -50,7 +50,7 @@ final class SearchService {
     }
 
     @discardableResult
-    func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
+    public func findNext (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
             lastResult = nil
             lastSelection = nil
@@ -68,7 +68,7 @@ final class SearchService {
     }
 
     @discardableResult
-    func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
+    public func findPrevious (term: String, options: SearchOptions = SearchOptions()) -> SearchResult? {
         guard state.isValidSearchTerm(term) else {
             lastResult = nil
             lastSelection = nil
@@ -85,7 +85,7 @@ final class SearchService {
         return result
     }
 
-    func findAll (term: String, options: SearchOptions = SearchOptions(), limit: Int = Constants.defaultHighlightLimit) -> [SearchResult] {
+    public func findAll (term: String, options: SearchOptions = SearchOptions(), limit: Int = 1000) -> [SearchResult] {
         guard state.isValidSearchTerm(term) else {
             return []
         }

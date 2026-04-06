@@ -21,7 +21,7 @@ public final class BufferLine: CustomDebugStringConvertible {
         /// Renders the bottom of a character, using two cells
         case doubledDown
     }
-    var isWrapped: Bool { didSet { bump() } }
+    public internal(set) var isWrapped: Bool { didSet { bump() } }
     var renderMode: RenderLineMode = .single { didSet { bump() } }
     private var data: UnsafeMutableBufferPointer<CharData>
     private var dataSize: Int

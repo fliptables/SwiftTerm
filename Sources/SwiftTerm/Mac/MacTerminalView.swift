@@ -42,6 +42,10 @@ import os.log
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, TerminalDelegate {
+    /// When true, frame size changes update the NSView but do not resize the terminal.
+    /// Used to prevent content duplication when a non-visible view changes size.
+    public var resizeSuspended = false
+
 #if canImport(MetalKit)
     // Default to throttling Metal redraws during live-resize; set SWIFTTERM_METAL_LIVE_RESIZE_THROTTLE=0 to disable.
     private static let metalLiveResizeThrottleEnabled: Bool = {
@@ -110,7 +114,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 
     var accessibility: AccessibilityService = AccessibilityService()
-    var search: SearchService!
+    public var search: SearchService!
     private var findBar: TerminalFindBarView?
     private var findBarTerm: String = ""
     private var findBarOptions: SearchOptions = SearchOptions()
@@ -170,7 +174,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     }
 #endif
 
-    var cellDimension: CellDimension!
+    public var cellDimension: CellDimension!
     var caretView: CaretView!
     var _fontSmoothing: Bool = true
     var _lineSpacing: CGFloat = 1.0
@@ -184,7 +188,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var progressReportTimer: Timer?
     private var lastProgressValue: UInt8?
 
-    var selection: SelectionService!
+    public var selection: SelectionService!
     private var scroller: NSScroller!
     
     // Attribute dictionary, maps a console attribute (color, flags) to the corresponding dictionary
@@ -2164,13 +2168,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         return terminal.encodeButton(button: event.buttonNumber, release: isReleaseEvent, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
     }
     
-    func calculateMouseHit (with event: NSEvent) -> (grid: Position, pixels: Position)
+    public func calculateMouseHit (with event: NSEvent) -> (grid: Position, pixels: Position)
     {
         let point = convert(event.locationInWindow, from: nil)
         return calculateMouseHit(at: point)
     }
 
-    func calculateMouseHit (at point: CGPoint) -> (grid: Position, pixels: Position)
+    public func calculateMouseHit (at point: CGPoint) -> (grid: Position, pixels: Position)
     {
         func toInt (_ p: NSPoint) -> Position {
 
@@ -2210,7 +2214,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             scrollUp(lines: autoScrollDelta)
         }
     }
-    
+
     private func shiftBypassesMouseReporting(for event: NSEvent) -> Bool {
         event.modifierFlags.contains(.shift) && !terminal.mouseShiftCapture
     }

@@ -84,7 +84,7 @@ struct ViewLineInfo {
 }
 
 extension TerminalView {
-    typealias CellDimension = CGSize
+    public typealias CellDimension = CGSize
 
 #if os(macOS)
     /// Controls whether font smoothing (sub-pixel rendering) is enabled during glyph drawing.
@@ -198,6 +198,7 @@ extension TerminalView {
     /// Returns true if this changed the number of columns/rows, false otherwise
     @discardableResult
     func processSizeChange (newSize: CGSize) -> Bool {
+        if resizeSuspended { return false }
         if newSize.width == 0 && newSize.height == 0 {
             return false
         }

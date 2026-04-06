@@ -7,11 +7,11 @@
 
 import Foundation
 
-struct SearchResult: Equatable {
-    let term: String
-    let col: Int
-    let row: Int
-    let size: Int
+public struct SearchResult: Equatable {
+    public let term: String
+    public let col: Int
+    public let row: Int
+    public let size: Int
 }
 
 struct SearchSelection {

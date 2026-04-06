@@ -343,6 +343,7 @@ open class Terminal {
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
     public private(set) var synchronizedOutputActive: Bool = false
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
+    private var synchronizedOutputSavedYDisp: Int = 0
 
     var displayBuffer: Buffer {
         buffer

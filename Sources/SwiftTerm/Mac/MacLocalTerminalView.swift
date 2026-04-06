@@ -98,6 +98,12 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate, LocalPr
         guard process.running else {
             return
         }
+        // Guard against degenerate sizes (e.g. SwiftUI setting frame to 0x0 during
+        // NSViewRepresentable insertion). Sending TIOCSWINSZ with rows=1/cols=2
+        // corrupts the shell's readline during initialization, breaking Tab completion.
+        guard newCols >= 2, newRows >= 1 else {
+            return
+        }
         var size = getWindowSize()
         let _ = PseudoTerminalHelpers.setWinSize(masterPtyDescriptor: process.childfd, windowSize: &size)
         
