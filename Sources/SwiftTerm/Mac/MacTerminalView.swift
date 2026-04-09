@@ -2429,37 +2429,75 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         }
     }
     
+    // Accumulator for high-resolution (trackpad / hi-res wheel) scroll deltas so we
+    // emit one discrete "notch" per N points of scroll instead of a flood of events.
+    // Without this, a single trackpad flick would send hundreds of mouse reports to
+    // the child process and cause a stuck-scroll loop (cf. anthropics/claude-code#42297).
+    private var wheelAccumulatorY: CGFloat = 0
+    private static let wheelPreciseNotchPoints: CGFloat = 16
+
     public override func scrollWheel(with event: NSEvent) {
-        if event.deltaY == 0 {
-            return
+        guard event.deltaY != 0 else { return }
+
+        // 1. Coalesce into discrete notches.
+        let notches: Int
+        if event.hasPreciseScrollingDeltas {
+            wheelAccumulatorY += event.scrollingDeltaY
+            let step = Self.wheelPreciseNotchPoints
+            notches = Int((wheelAccumulatorY / step).rounded(.towardZero))
+            wheelAccumulatorY -= CGFloat(notches) * step
+        } else {
+            notches = Int(event.deltaY.rounded(.towardZero))
+            wheelAccumulatorY = 0
         }
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode != .off {
+        guard notches != 0 else { return }
+        let isUp = notches > 0
+        let count = abs(notches)
+
+        // 2. Mouse-reporting path (Claude Code NO_FLICKER, htop, btop, lazygit, nvim mouse=a).
+        //    Encode the wheel as an xterm mouse report (buttons 64/65) and send it to the child.
+        //    Shift bypass (from upstream #536) lets the user override mouse capture for selection.
+        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode.sendButtonPress() {
             let hit = calculateMouseHit(with: event)
             let displayBuffer = terminal.displayBuffer
-            let screenRow = max (0, min (displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
-            let button = event.deltaY > 0 ? 4 : 5
+            let screenRow = max(0, min(displayBuffer.rows - 1, hit.grid.row - displayBuffer.yDisp))
             let flags = event.modifierFlags
-            let buttonFlags = terminal.encodeButton(button: button, release: false, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
-            let lines = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
-            for _ in 0..<lines {
-                terminal.sendEvent(buttonFlags: buttonFlags, x: hit.grid.col, y: screenRow, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+            let button = isUp ? 4 : 5
+            let encoded = terminal.encodeButton(
+                button: button,
+                release: false,
+                shift: flags.contains(.shift),
+                meta: flags.contains(.option),
+                control: flags.contains(.control))
+            for _ in 0..<count {
+                terminal.sendEvent(
+                    buttonFlags: encoded,
+                    x: hit.grid.col,
+                    y: screenRow,
+                    pixelX: hit.pixels.col,
+                    pixelY: hit.pixels.row)
             }
-        } else if terminal.isDisplayBufferAlternate {
-            let lines = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
-            for _ in 0..<lines {
-                if event.deltaY > 0 {
-                    sendKeyUp()
-                } else {
-                    sendKeyDown()
-                }
-            }
+            return
+        }
+
+        // 3. alternateScroll fallback: on the alt screen without mouse reporting,
+        //    translate wheel to Up/Down arrow key sequences so pagers (less, man,
+        //    git log) page with the wheel. Matches xterm's alternateScroll resource.
+        if terminal.isCurrentBufferAlternate {
+            let appCursor = terminal.applicationCursor
+            let seq = isUp
+                ? (appCursor ? EscapeSequences.moveUpApp   : EscapeSequences.moveUpNormal)
+                : (appCursor ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
+            for _ in 0..<count { send(seq) }
+            return
+        }
+
+        // 4. Normal buffer, no mouse reporting: existing local viewport scroll.
+        let velocity = calcScrollingVelocity(delta: count)
+        if isUp {
+            scrollUp(lines: velocity)
         } else {
-            let velocity = calcScrollingVelocity(delta: Int(abs(event.deltaY)))
-            if event.deltaY > 0 {
-                scrollUp(lines: velocity)
-            } else {
-                scrollDown(lines: velocity)
-            }
+            scrollDown(lines: velocity)
         }
     }
     
