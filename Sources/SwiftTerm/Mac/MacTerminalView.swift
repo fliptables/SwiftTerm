@@ -810,8 +810,6 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         scroller.knobProportion = scrollThumbsize
     }
     
-    var userScrolling = false
-
     override open func viewWillDraw() {
         
         // Starting with BigSur, it looks like even sending one pixel to be redrawn will trigger
@@ -2436,7 +2434,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     private var wheelAccumulatorY: CGFloat = 0
     private static let wheelPreciseNotchPoints: CGFloat = 16
 
-    public override func scrollWheel(with event: NSEvent) {
+    open override func scrollWheel(with event: NSEvent) {
         guard event.deltaY != 0 else { return }
 
         // 1. Coalesce into discrete notches.
