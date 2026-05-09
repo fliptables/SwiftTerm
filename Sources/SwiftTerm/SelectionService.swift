@@ -181,8 +181,14 @@ public class SelectionService: CustomDebugStringConvertible {
      * The bufferPosition is buffer-relative
      */
     public func shiftExtend (bufferPosition newEnd: Position) {
+        if selectionMode == .rectangular {
+            end = clamp(terminal.displayBuffer, newEnd)
+            setActiveAndNotify()
+            return
+        }
+
         var adjustedNewEnd = newEnd
-        
+
         // If we're in word selection mode, extend to word boundaries
         if selectionMode == .word {
             let direction = Position.compare(newEnd, start) == .before ? -1 : 1
@@ -232,9 +238,26 @@ public class SelectionService: CustomDebugStringConvertible {
         guard let pivot = pivot else {
             return
         }
-        
+
+        if selectionMode == .rectangular {
+            let clamped = clamp(terminal.displayBuffer, bufferPosition)
+            switch Position.compare(clamped, pivot) {
+            case .after:
+                start = pivot
+                end = clamped
+            case .before:
+                start = clamped
+                end = pivot
+            case .equal:
+                start = pivot
+                end = pivot
+            }
+            setActiveAndNotify()
+            return
+        }
+
         var adjustedPosition = bufferPosition
-        
+
         // If we're in word selection mode, extend to word boundaries
         if selectionMode == .word {
             let direction = Position.compare(bufferPosition, pivot) == .before ? -1 : 1
@@ -270,14 +293,20 @@ public class SelectionService: CustomDebugStringConvertible {
      * The position is in buffer coordinates
      */
     public func dragExtend (bufferPosition: Position) {
+        if selectionMode == .rectangular {
+            end = clamp(terminal.displayBuffer, bufferPosition)
+            setActiveAndNotify()
+            return
+        }
+
         var adjustedEnd = bufferPosition
-        
+
         // If we're in word selection mode, extend to word boundaries
         if selectionMode == .word {
             let direction = Position.compare(bufferPosition, start) == .before ? -1 : 1
             adjustedEnd = extendToWordBoundary(position: bufferPosition, in: terminal.displayBuffer, direction: direction)
         }
-        
+
         end = adjustedEnd
         setActiveAndNotify()
     }
@@ -299,6 +328,10 @@ public class SelectionService: CustomDebugStringConvertible {
         case character
         case word
         case row
+        // Column-block selection. Each row in [min(start.row,end.row), max(...)] contributes
+        // the same column slice [min(start.col,end.col), max(...)]. Drag/shift/pivot extend
+        // only updates `end`; word-boundary expansion is intentionally skipped.
+        case rectangular
     }
     
     public var selectionMode: SelectionMode = .character
@@ -534,6 +567,9 @@ public class SelectionService: CustomDebugStringConvertible {
     }
     
     public func getSelectedText () -> String {
+        if selectionMode == .rectangular {
+            return terminal.getRectangularText(start: start, end: end, buffer: terminal.displayBuffer)
+        }
         let (min, max) = if Position.compare(start, end) == .before {
             (start, end)
         } else {

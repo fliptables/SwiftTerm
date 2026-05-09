@@ -2217,8 +2217,21 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         event.modifierFlags.contains(.shift) && !terminal.mouseShiftCapture
     }
 
+    /// Option held — or a rectangular selection mid-drag — bypasses mouse-reporting
+    /// forwarding. Sibling of `shiftBypassesMouseReporting` (upstream #536), but for
+    /// Option-modifier rectangular selection. Both gates apply at every mouse-event
+    /// site so users can do native selection inside any TUI that's enabled mouse
+    /// reporting (vim, htop, less, fzf).
+    private func optionBypassesMouseReporting(for event: NSEvent) -> Bool {
+        return event.modifierFlags.contains(.option)
+            || selection.selectionMode == .rectangular
+    }
+
     open override func mouseDown(with event: NSEvent) {
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode.sendButtonPress() {
+        if allowMouseReporting
+            && !shiftBypassesMouseReporting(for: event)
+            && !optionBypassesMouseReporting(for: event)
+            && terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(with: event)
             return
         }
@@ -2263,16 +2276,19 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
             return
         }
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) && terminal.mouseMode.sendButtonRelease() {
+        if allowMouseReporting
+            && !shiftBypassesMouseReporting(for: event)
+            && !optionBypassesMouseReporting(for: event)
+            && terminal.mouseMode.sendButtonRelease() {
             sharedMouseEvent(with: event)
             return
         }
-        
+
         #if DEBUG
         // let hit = calculateMouseHit(with: event)
         //print ("Up at col=\(hit.col) row=\(hit.row) count=\(event.clickCount) selection.active=\(selection.active) didSelectionDrag=\(didSelectionDrag) ")
         #endif
-        
+
         didSelectionDrag = false
     }
     
@@ -2280,7 +2296,9 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         let displayBuffer = terminal.displayBuffer
         let mouseHit = calculateMouseHit(with: event)
         let hit = mouseHit.grid
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: event) {
+        if allowMouseReporting
+            && !shiftBypassesMouseReporting(for: event)
+            && !optionBypassesMouseReporting(for: event) {
             if terminal.mouseMode.sendButtonTracking() {
                 let flags = encodeMouseEvent(with: event)
                 let screenRow = max (0, min (displayBuffer.rows - 1, hit.row - displayBuffer.yDisp))

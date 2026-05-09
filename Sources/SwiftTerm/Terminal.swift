@@ -6699,6 +6699,36 @@ open class Terminal {
     {
         buffer.translateBufferLineToString(lineIndex: line, trimRight: true, startCol: start, endCol: end, skipNullCellsFollowingWide: true, characterProvider: { self.getCharacter(for: $0) }).replacingOccurrences(of: "\u{0}", with: " ")
     }
+
+    /// Returns the text inside the rectangle defined by `start` and `end`, joined with `\n`.
+    /// Each row in `[min(start.row,end.row), max(...)]` contributes the column slice
+    /// `[min(start.col,end.col), max(...))`, right-trimmed per row. Wrapped lines are
+    /// intentionally ignored — every visual row is independent.
+    func getRectangularText (start: Position, end: Position, buffer: Buffer) -> String
+    {
+        let lo = min(start.row, end.row)
+        let hi = max(start.row, end.row)
+        let minCol = min(start.col, end.col)
+        let maxCol = max(start.col, end.col)
+        guard maxCol > minCol else { return "" }
+
+        let lineCount = buffer.lines.count
+        guard lineCount > 0 else { return "" }
+        let firstRow = max(0, lo)
+        let lastRow = min(lineCount - 1, hi)
+        guard firstRow <= lastRow else { return "" }
+
+        var rows: [String] = []
+        rows.reserveCapacity(lastRow - firstRow + 1)
+        for r in firstRow...lastRow {
+            // translateBufferLineToString uses trimRight:true, which clamps the slice's
+            // upper bound to the row's last non-blank cell — giving us per-row rstrip
+            // within the column slice for free. Rows with no content in the slice
+            // produce "" → the join below preserves them as blank lines.
+            rows.append(translateBufferLineToString(buffer: buffer, line: r, start: minCol, end: maxCol))
+        }
+        return rows.joined(separator: "\n")
+    }
 }
 
 // Default implementations

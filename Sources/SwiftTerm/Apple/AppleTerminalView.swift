@@ -877,6 +877,20 @@ extension TerminalView {
         let startCol = selection.start.col
         let endCol = selection.end.col
 
+        // Rectangular (column-block) selection: every row in [minRow, maxRow]
+        // contributes the same column slice [minCol, maxCol). Wrapped lines are
+        // intentionally ignored — each visual row is independent.
+        if selection.selectionMode == .rectangular {
+            let minRow = min(startRow, endRow)
+            let maxRow = max(startRow, endRow)
+            guard row >= minRow && row <= maxRow else { return nil }
+            let minCol = min(startCol, endCol)
+            let maxCol = max(startCol, endCol)
+            let lower = max(0, min(minCol, cols))
+            let upper = max(lower, min(maxCol, cols))
+            return lower < upper ? lower..<upper : nil
+        }
+
         var selectionRange: NSRange = .empty
 
         // single row
