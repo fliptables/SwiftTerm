@@ -100,16 +100,22 @@ public class SelectionService: CustomDebugStringConvertible {
         return Position(col: min(p.col, buffer.cols - 1), row: min(p.row, maxRow))
     }
     /**
-     * Sets the selection, this is validated against the
+     * Sets the selection, this is validated against the buffer bounds.
+     *
+     * Resets `selectionMode` to `.character` — same invariant as `startSelection()`,
+     * `select(row:)`, and `selectWordOrExpression(...)`. Callers that want a
+     * non-character mode (e.g. `.rectangular`) should set `selectionMode` *after*
+     * calling this method.
      */
     public func setSelection (start: Position, end: Position) {
         let buffer = terminal.displayBuffer
         let sclamped = clamp (buffer, start)
         let eclamped = clamp (buffer, end)
-        
+
         self.start = sclamped
         self.end = eclamped
-        
+        selectionMode = .character
+
         setActiveAndNotify()
     }
     

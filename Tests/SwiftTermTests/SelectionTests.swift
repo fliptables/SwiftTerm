@@ -340,11 +340,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 2, row: 0),
             end: Position(col: 6, row: 2)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
     }
 
@@ -355,11 +355,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 6, row: 2),
             end: Position(col: 2, row: 0)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
     }
 
@@ -370,11 +370,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 6, row: 0),
             end: Position(col: 2, row: 2)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
     }
 
@@ -385,11 +385,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 5, row: 0),
             end: Position(col: 5, row: 2)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "")
     }
 
@@ -400,11 +400,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "AAA\r\n\r\nCCC")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 0, row: 0),
             end: Position(col: 3, row: 2)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "AAA\n\nCCC")
     }
 
@@ -417,11 +417,11 @@ final class SelectionTests: TerminalDelegate {
         // Row 1: "klmnop" (6 chars). Slice [0..6) keeps all 6.
         terminal.feed(text: "ab\r\nklmnop")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 0, row: 0),
             end: Position(col: 6, row: 1)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "ab\nklmnop")
     }
 
@@ -433,11 +433,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 1, row: 0),
             end: Position(col: 1, row: 0)
         )
+        selection.selectionMode = .rectangular
         selection.dragExtend(bufferPosition: Position(col: 8, row: 0))
 
         #expect(selection.end.col == 8)
@@ -452,11 +452,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world test")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 1, row: 0),
             end: Position(col: 4, row: 0)
         )
+        selection.selectionMode = .rectangular
         selection.shiftExtend(bufferPosition: Position(col: 9, row: 0))
 
         #expect(selection.start.col == 1)
@@ -472,11 +472,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 0, row: 0),
             end: Position(col: 3, row: 0)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.selectionMode == .rectangular)
 
         selection.selectWordOrExpression(at: Position(col: 6, row: 0), in: terminal.buffer)
@@ -491,11 +491,11 @@ final class SelectionTests: TerminalDelegate {
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 0, row: 0),
             end: Position(col: 3, row: 0)
         )
+        selection.selectionMode = .rectangular
         selection.startSelection(row: 0, col: 5)
 
         #expect(selection.selectionMode == .character)
@@ -510,11 +510,36 @@ final class SelectionTests: TerminalDelegate {
         // "あ" is 2 cells (lead + trailing null). Cols 0..3 covers glyph + '1'.
         terminal.feed(text: "あ12345")
 
-        selection.selectionMode = .rectangular
         selection.setSelection(
             start: Position(col: 0, row: 0),
             end: Position(col: 3, row: 0)
         )
+        selection.selectionMode = .rectangular
         #expect(selection.getSelectedText() == "あ1")
+    }
+
+    /// setSelection resets mode to .character — guards against rectangular
+    /// stickiness when another feature (search result highlight, programmatic
+    /// selection) drives the selection without setting mode explicitly.
+    @Test func testSetSelectionResetsRectangularMode() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "hello world")
+
+        // Start with a rectangular selection.
+        selection.setSelection(
+            start: Position(col: 1, row: 0),
+            end: Position(col: 4, row: 0)
+        )
+        selection.selectionMode = .rectangular
+
+        // Simulate the search code path: setSelection with no explicit mode reset.
+        selection.setSelection(
+            start: Position(col: 6, row: 0),
+            end: Position(col: 11, row: 0)
+        )
+
+        #expect(selection.selectionMode == .character)
+        #expect(selection.getSelectedText() == "world")
     }
 }
