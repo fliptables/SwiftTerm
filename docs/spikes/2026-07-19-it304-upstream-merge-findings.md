@@ -13,6 +13,21 @@ selection API (rectangular/column-block mode), scroll-lock coordination with the
 host app, wheel-event handling, and the resize/PTY guards — see fork commits
 `1dd10ec`..`d0d66e9`.
 
+> **THE reusable lesson from this merge — a clean auto-merge is not a correct
+> merge.** Git auto-merged `MacTerminalView.swift` without reporting a conflict,
+> and the result was semantically wrong: it honored our deletion of the
+> view-level `userScrolling` shadow while upstream's *new* shared code
+> (`updateUserScrollingState` in `AppleTerminalView.swift`) assigns to that very
+> property. The two edits never touched the same lines, so git had nothing to
+> flag. We were lucky: this instance failed loudly at compile time. The same
+> class of auto-merge — our side deletes or renames something, upstream's side
+> grows a new caller or a new behavioral dependency on it in a *different file
+> or region* — can just as easily produce a **runnable** result with silently
+> wrong behavior, and that is what ships if the review stops at "no conflicts,
+> suite green." Whoever does the next upstream sync: audit the auto-merged
+> files against both sides' diffs, not just the files git marks as conflicted.
+> (Details in the MacTerminalView section below.)
+
 ## Conflicted files (git-reported conflicts: 4)
 
 ### 1. `Sources/SwiftTerm/Apple/AppleTerminalView.swift` — 2 hunks, both in `scroll(toPosition:)`
@@ -155,6 +170,74 @@ did not modify, wide-glyph caret sizing, iOS sub-row scroll fixes.
 - `swift test`: **463 tests, 38 suites, all pass** (includes upstream's new
   FocusReportTests, GlyphAtlasTests, KittyOptionComposeTests).
 - SelectionTests assertion audit: see §4 above.
+
+## QA script (Nash, on Scape built against `4b12f40`)
+
+Ordered by risk: each item names the merged change that could plausibly break it
+and what "pass" looks like. Selection and scroll regressions are exactly the
+class that passes 463/463 unit tests and fails visibly in use.
+
+1. **Scroll-lock under streaming output** (upstream `updateUserScrollingState`
+   replaced our `scrollPosition < 0.999` hack; plus our `feedPrepare` gate).
+   Run `while true; do date; sleep 0.05; done`. Scroll up mid-stream with the
+   wheel AND by dragging the scroller thumb. Pass: viewport stays pinned (no
+   snap-to-bottom), and a selection made while scrolled up **survives** the
+   streaming output. Scroll back to the very bottom: auto-follow resumes.
+2. **Programmatic `scrollTo(row:)`** (the path Scape calls, newly covered by
+   scroll-lock state). Use whatever Scape UI drives scrollback navigation
+   (jump-to-top / search-result jump). Pass: jumping up engages scroll-lock
+   (output doesn't yank the view down); returning to bottom releases it. This
+   is the restored `userScrolling` shadow + `terminal.userScrolling` staying in
+   sync — the hand-fixed wrong auto-merge; give it real attention.
+3. **Rectangular / column-block selection** (ours, re-merged around upstream's
+   dragExtend rewrite). In a shell with columnar output (`ls -l`): Option-drag
+   a column block — forward, reverse (lower-right→upper-left), and diagonal.
+   Copy and paste into an editor. Pass: per-row slices with blank rows
+   preserved, no word-snapping mid-drag. Also over CJK text (`echo あいうえお`)
+   — glyphs never half-selected. Zero-width drag selects nothing.
+4. **Mode-reset stickiness** (our `b97855a` + upstream's anchor interacting).
+   After a rectangular copy: double-click a word (must select just the word),
+   then plain-drag (must be linear character selection, not a rectangle). Then
+   use find-in-terminal: the match highlight must be a normal linear selection.
+5. **Word drag-extend — upstream's #576 pivot, a deliberate behavior CHANGE.**
+   Double-click a word, then drag *backwards* (left/up): the seed word now
+   stays selected (pre-merge it was dropped). Drag forward: extends by whole
+   words. Confirm the new behavior feels right in Scape rather than fighting
+   any Scape-side double-click handling.
+6. **Option-drag inside mouse-reporting TUIs** (our `optionBypassesMouseReporting`,
+   re-merged around upstream's new mouse-event code). In `vim` (`:set mouse=a`)
+   and `htop`: plain drag drives the TUI; Option-drag does native (rectangular)
+   selection; Shift-drag does native linear selection. Release Option: TUI
+   mouse handling back to normal.
+7. **Wheel behavior matrix** (our full `scrollWheel` rewrite — upstream didn't
+   touch it, so this is a pure regression check). Trackpad flick in: (a) plain
+   shell → smooth viewport scroll; (b) `less`/`man` → pages via arrow keys;
+   (c) Claude Code / htop → TUI scrolls, no stuck-scroll flood; (d) Shift+wheel
+   while a TUI captures the mouse → local viewport scroll.
+8. **Selection drag past the edge auto-scrolls** (upstream fix; previously
+   dragging past the *bottom* edge scrolled the wrong way). With scrollback
+   present, start a selection and hold the pointer below the bottom edge, then
+   above the top edge. Pass: viewport keeps scrolling in the drag direction and
+   the selection grows to match, without moving the mouse.
+9. **Selection colors** (upstream now forces a selection *foreground* — default
+   black on teal — where pre-merge only the background changed). Select text
+   containing colored `ls` output, underlines, and dim text in Scape's dark
+   theme. Pass: selected text clearly readable, no black-on-dark artifacts. If
+   Scape customizes only `selectedTextBackgroundColor`, check the forced black
+   foreground doesn't clash — this is the most likely "looks wrong" candidate.
+10. **Resize + PTY guards** (ours, preserved). Live-resize the window with vim
+    open — no content duplication or ghosting; after opening a brand-new
+    terminal tab (SwiftUI 0×0 sizing pass), Tab-completion still works in the
+    shell. Restricted-region ghosting (upstream #582 fix): in `vim`, scroll a
+    split — no stale row ghost below the split.
+11. **Links + hover on macOS 26** (upstream's per-window mouse-moved fallback
+    rewrite). Cmd-hover highlights links, click opens exactly one browser tab;
+    with two terminal panes in one window, hover tracking works in both and
+    only the hovered pane reacts. On macOS < 26 this path is inert.
+12. **Scrollback hit-testing** (upstream's viewport-row mouse-motion fix +
+    our copy paths). Scroll up several pages: click-select and copy — the
+    selected rows are the rows you see; link clicks hit the link under the
+    pointer, not an offset row.
 
 ## Follow-ups (not done in this merge)
 
