@@ -1,3 +1,16 @@
+> **Scape fork note (fliptables/SwiftTerm) — read before pushing.**
+> `scape-selection-api` is the long-lived Scape branch of this fork; the Scape
+> app pins it **by revision SHA** in `project.pbxproj` / `Package.resolved`, so
+> **do not delete or force-rewrite this branch** — a pinned SHA stranded off any
+> branch can be garbage-collected and would break every Scape build's package
+> resolution. Historical trap (fixed 2026-07-19, IT-301): this branch's local
+> upstream config pointed at `refs/heads/main`, so a bare `git push` from it
+> tried to push ~70 fork-only commits onto `main`. The tracking config now
+> points at `origin/scape-selection-api`, but if you ever recreate the branch,
+> push with the explicit refspec
+> `git push origin scape-selection-api:scape-selection-api` and set upstream
+> with `git branch -u origin/scape-selection-api scape-selection-api`.
+
 
 SwiftTerm
 =========
