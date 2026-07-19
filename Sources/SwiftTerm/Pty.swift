@@ -102,7 +102,28 @@ public class PseudoTerminalHelpers {
             if let cCurrentDirectory {
                 _ = chdir(cCurrentDirectory)
             }
-            
+
+            // Close every inherited fd >= 3 before exec. forkpty's login_tty
+            // has already dup2'd the slave pty onto 0/1/2 and closed the
+            // master in this child, so everything >= 3 is an accidental leak
+            // from the (multithreaded) parent — pipes created without
+            // O_CLOEXEC anywhere in the app race this fork and, once
+            // inherited by a long-lived shell, hold their write ends open
+            // forever so the parent's pipe reads never EOF (Scape IT-301:
+            // launch-time git fan-out wedged 6 cooperative-pool threads).
+            // macOS has no pipe2()/close_range(), so the parent cannot make
+            // pipe creation atomically CLOEXEC — this close loop is the only
+            // race-free closure. Only async-signal-safe calls are legal here
+            // between fork and exec in a multithreaded parent: close() is.
+            // If a deliberately-inherited fd is ever introduced (none exist
+            // today), it must be allowlisted explicitly in this loop.
+            let fdLimit = min(getdtablesize(), 65536)
+            var leakedFd: Int32 = 3
+            while leakedFd < fdLimit {
+                close(leakedFd)
+                leakedFd += 1
+            }
+
             _ = execve(cExecutable, cArgs.base, cEnv.base)
             _exit(127)
         }
