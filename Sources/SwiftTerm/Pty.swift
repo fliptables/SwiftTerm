@@ -93,7 +93,23 @@ public class PseudoTerminalHelpers {
         }
 
         var master: Int32 = 0
-        
+
+        // Exclusive upper bound for the child's fd close loop, sampled BEFORE
+        // fork. On Darwin getdtablesize() == min(RLIMIT_NOFILE soft limit,
+        // kern.maxfilesperproc), which is the exclusive upper bound on
+        // allocatable fd NUMBERS: dup2/open to any number >= it fails EBADF
+        // (empirically verified — see Scape
+        // docs/spikes/2026-07-19-it301-fd-hygiene-fix-findings.md).
+        // Precomputed in the parent because getdtablesize() is not among the
+        // portable async-signal-safe functions; the child loop below must be
+        // only close() + scalar arithmetic. Floor of OPEN_MAX (10240) guards
+        // a failed/absurd return. PRECONDITION: nothing in-process lowers
+        // RLIMIT_NOFILE after descriptors are created — a lowered soft limit
+        // would strand fds above the sampled bound. No setrlimit caller
+        // exists in Scape or SwiftTerm (grep-verified 2026-07-19); if one is
+        // ever added, revisit this bound.
+        let fdLimit = max(getdtablesize(), 10240)
+
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
             return nil
@@ -103,21 +119,24 @@ public class PseudoTerminalHelpers {
                 _ = chdir(cCurrentDirectory)
             }
 
-            // Close every inherited fd >= 3 before exec. forkpty's login_tty
-            // has already dup2'd the slave pty onto 0/1/2 and closed the
-            // master in this child, so everything >= 3 is an accidental leak
-            // from the (multithreaded) parent — pipes created without
-            // O_CLOEXEC anywhere in the app race this fork and, once
+            // Close every inherited fd >= 3 before exec (fdLimit — the bound
+            // on allocatable fd numbers — was sampled pre-fork above, so this
+            // sweep covers every fd the parent could possibly have open).
+            // forkpty's login_tty has already dup2'd the slave pty onto 0/1/2
+            // and closed the master in this child, so everything >= 3 is an
+            // accidental leak from the (multithreaded) parent — pipes created
+            // without O_CLOEXEC anywhere in the app race this fork and, once
             // inherited by a long-lived shell, hold their write ends open
             // forever so the parent's pipe reads never EOF (Scape IT-301:
             // launch-time git fan-out wedged 6 cooperative-pool threads).
             // macOS has no pipe2()/close_range(), so the parent cannot make
             // pipe creation atomically CLOEXEC — this close loop is the only
             // race-free closure. Only async-signal-safe calls are legal here
-            // between fork and exec in a multithreaded parent: close() is.
+            // between fork and exec in a multithreaded parent: the loop is
+            // close() and scalar arithmetic only. Cost is paid in the CHILD
+            // (~32 ms at a 245k bound), off the parent's spawn path.
             // If a deliberately-inherited fd is ever introduced (none exist
             // today), it must be allowlisted explicitly in this loop.
-            let fdLimit = min(getdtablesize(), 65536)
             var leakedFd: Int32 = 3
             while leakedFd < fdLimit {
                 close(leakedFd)
