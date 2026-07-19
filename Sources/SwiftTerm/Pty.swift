@@ -103,11 +103,15 @@ public class PseudoTerminalHelpers {
         // Precomputed in the parent because getdtablesize() is not among the
         // portable async-signal-safe functions; the child loop below must be
         // only close() + scalar arithmetic. Floor of OPEN_MAX (10240) guards
-        // a failed/absurd return. PRECONDITION: nothing in-process lowers
-        // RLIMIT_NOFILE after descriptors are created — a lowered soft limit
-        // would strand fds above the sampled bound. No setrlimit caller
-        // exists in Scape or SwiftTerm (grep-verified 2026-07-19); if one is
-        // ever added, revisit this bound.
+        // a failed/absurd return. PRECONDITION: the sample is safe only in
+        // the absence of ANY concurrent RLIMIT_NOFILE mutation — in either
+        // direction. A LOWER after descriptors exist strands fds above the
+        // sampled bound; a RAISE between this sample and forkpty lets a
+        // concurrent thread allocate an fd above the sampled bound that the
+        // child sweep then misses (sample 2,560 → raise → open fd 70,000 →
+        // fork → sweep stops at 2,559). No setrlimit caller exists in Scape
+        // or SwiftTerm (grep-verified 2026-07-19); if one is ever added,
+        // revisit this bound.
         let fdLimit = max(getdtablesize(), 10240)
 
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
