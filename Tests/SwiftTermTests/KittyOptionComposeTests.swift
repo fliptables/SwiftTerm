@@ -13,6 +13,8 @@ import AppKit
 import Testing
 @testable import SwiftTerm
 
+// Drives a TerminalView's input path, which must run on the main thread (F.4).
+@MainActor
 final class KittyOptionComposeTests {
 
     /// Captures bytes the view sends to the PTY.
@@ -58,7 +60,7 @@ final class KittyOptionComposeTests {
         view.optionAsMetaKey = false
 
         // Push kitty flags 11 = disambiguate(1) + reportAlternates(2) + reportAllKeys(8).
-        view.getTerminal().feed(text: "\u{1b}[>11u")
+        view.feed(text: "\u{1b}[>11u")
 
         // kVK_ANSI_2 == 19. Bare key on the Czech layout yields "ě"; Option composes "@".
         let event = optionKeyEvent(characters: "@", charactersIgnoringModifiers: "ě", keyCode: 19)

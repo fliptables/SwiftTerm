@@ -7,6 +7,8 @@
 
 import Foundation
 
+/// Search state is guarded by `terminal.terminalLock`; callers must hold it.
+/// (Scape fork: `public` visibility grant — Scape drives find-in-terminal.)
 public final class SearchService {
     private enum Constants {
         static let defaultHighlightLimit = 1000

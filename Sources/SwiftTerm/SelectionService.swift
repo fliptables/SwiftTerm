@@ -12,9 +12,22 @@ import Foundation
  * Tracks the selection state in the terminal, the selection is determined by the `active`
  * property, and if that is true, then the `start` and `end` represents offsets within
  * the terminal's buffer.  They are guaranteed to be ordered.
+ *
+ * All state is guarded by `terminal.terminalLock`; callers must hold it.
  */
 public class SelectionService: CustomDebugStringConvertible {
     var terminal: Terminal
+
+    struct SelectedContentSnapshot {
+        struct Row: Equatable {
+            let cells: [PackedCell]
+            let isWrapped: Bool
+            let bidiState: BidiPresentationState
+        }
+
+        let buffer: Buffer
+        let rows: [Row]
+    }
     
     public init (terminal: Terminal)
     {
@@ -24,13 +37,271 @@ public class SelectionService: CustomDebugStringConvertible {
         end = Position(col: 0, row: 0)
         pivot = Position(col: 0, row: 0)
         hasSelectionRange = false
+        terminal.register (selection: self)
+    }
+
+    /// Removes this service from the terminal's registry.
+    ///
+    /// This is what makes the registry's `unowned(unsafe)` slots safe: the entry
+    /// is gone before the object is. `terminal` is held strongly, so it is
+    /// guaranteed to still be alive here.
+    deinit {
+        terminal.unregister (selection: self)
+    }
+
+    /**
+     * Translates the selection when the terminal shifts lines in place, which
+     * happens when an application scrolls a region set with DECSTBM that does
+     * not start at the top of the screen.  Those scrolls do not push lines into
+     * the scrollback, so `yDisp` does not move and the absolute rows the
+     * selection is anchored to end up holding different text.
+     *
+     * Rows outside the scrolled region keep their position.  A selection is
+     * dropped if it scrolls out of the region or crosses a region boundary.
+     * In those cases, the original text is gone or is no longer contiguous.
+     */
+    func adjustForInPlaceScroll (top: Int, bottom: Int, lines: Int)
+    {
+        guard active, lines != 0 else {
+            return
+        }
+
+        let (first, last) = Position.compare (start, end) == .before ? (start, end) : (end, start)
+        let intersectsRegion = first.row <= bottom && last.row >= top
+        guard intersectsRegion else {
+            return
+        }
+        guard first.row >= top && last.row <= bottom else {
+            selectNone ()
+            return
+        }
+
+        func translate (_ position: Position) -> Position? {
+            guard position.row >= top && position.row <= bottom else {
+                return position
+            }
+            let newRow = position.row - lines
+            guard newRow >= top && newRow <= bottom else {
+                return nil
+            }
+            return Position (col: position.col, row: newRow)
+        }
+
+        guard let newStart = translate (start), let newEnd = translate (end) else {
+            selectNone ()
+            return
+        }
+
+        let newPivot: Position?
+        if let pivot, pivot == start || pivot == end {
+            guard let translatedPivot = translate (pivot) else {
+                selectNone ()
+                return
+            }
+            newPivot = translatedPivot
+        } else {
+            newPivot = pivot
+        }
+
+        let newWordSelectionAnchor: (start: Position, end: Position)?
+        if let wordSelectionAnchor {
+            guard let translatedStart = translate (wordSelectionAnchor.start),
+                  let translatedEnd = translate (wordSelectionAnchor.end) else {
+                selectNone ()
+                return
+            }
+            newWordSelectionAnchor = (translatedStart, translatedEnd)
+        } else {
+            newWordSelectionAnchor = nil
+        }
+
+        let newRowSelectionAnchor: Int?
+        if let rowSelectionAnchor {
+            guard let translatedAnchor = translate(
+                Position(col: 0, row: rowSelectionAnchor)
+            ) else {
+                selectNone ()
+                return
+            }
+            newRowSelectionAnchor = translatedAnchor.row
+        } else {
+            newRowSelectionAnchor = nil
+        }
+
+        start = newStart
+        end = newEnd
+        pivot = newPivot
+        wordSelectionAnchor = newWordSelectionAnchor
+        rowSelectionAnchor = newRowSelectionAnchor
+        terminal.tdel?.selectionChanged (source: terminal)
+    }
+
+    /**
+     * Clears the selection if it overlaps a region whose contents were shifted
+     * only within a range of columns, which happens when margin mode narrows
+     * the scrolled area (DECSLRM).  A selection cannot be represented as
+     * partially shifted, so the honest answer is to drop it.
+     */
+    func invalidateForColumnRestrictedScroll (top: Int, bottom: Int, left: Int, right: Int)
+    {
+        guard active else {
+            return
+        }
+
+        let (first, last) = Position.compare (start, end) == .before ? (start, end) : (end, start)
+        guard first.row <= bottom && last.row >= top else {
+            return
+        }
+        // A single-row selection that sits entirely outside the margin columns
+        // is unaffected; anything spanning rows crosses them by definition.
+        if first.row == last.row && (last.col < left || first.col > right) {
+            return
+        }
+        selectNone ()
+    }
+
+    /// Captures the cells that the active selection identifies.
+    ///
+    /// A feed can move these cells through a scroll operation. The selection
+    /// service adjusts its row positions during that operation. A later
+    /// comparison therefore uses the adjusted positions and does not depend on
+    /// the original row numbers.
+    func captureSelectedContent () -> SelectedContentSnapshot?
+    {
+        guard active else {
+            return nil
+        }
+        let buffer = terminal.displayBuffer
+        guard let rows = selectedContentRows (in: buffer) else {
+            return nil
+        }
+        return SelectedContentSnapshot (buffer: buffer, rows: rows)
+    }
+
+    /// Clears the selection when a feed changed its buffer or selected cells.
+    func clearIfSelectedContentChanged (from snapshot: SelectedContentSnapshot)
+    {
+        guard active else {
+            return
+        }
+        let buffer = terminal.displayBuffer
+        guard buffer === snapshot.buffer,
+              selectedContentRows (in: buffer) == snapshot.rows else {
+            selectNone ()
+            return
+        }
+    }
+
+    private func selectedContentRows (in buffer: Buffer) -> [SelectedContentSnapshot.Row]?
+    {
+        let firstRow = min (start.row, end.row)
+        let lastRow = max (start.row, end.row)
+        guard firstRow >= 0, lastRow < buffer.lines.count else {
+            return nil
+        }
+
+        var result: [SelectedContentSnapshot.Row] = []
+        result.reserveCapacity (lastRow - firstRow + 1)
+        for row in firstRow...lastRow {
+            let line = buffer.lines [row]
+            guard let columns = selectedColumnsRange (row: row, cols: line.count) else {
+                continue
+            }
+            let cells = columns.map { line.packedCell (at: $0) }
+            result.append (SelectedContentSnapshot.Row (
+                cells: cells,
+                isWrapped: line.isWrapped,
+                bidiState: line.bidiState))
+        }
+        return result
+    }
+
+    func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
+    {
+        // Scape fork: rectangular (column-block) selection — every row in
+        // [minRow, maxRow] contributes the same column slice [minCol, maxCol).
+        // Wrapped lines are intentionally ignored; each visual row is independent.
+        if selectionMode == .rectangular {
+            let minRow = min(start.row, end.row)
+            let maxRow = max(start.row, end.row)
+            guard row >= minRow && row <= maxRow else { return nil }
+            let minCol = min(start.col, end.col)
+            let maxCol = max(start.col, end.col)
+            let lower = max(0, min(minCol, cols))
+            let upper = max(lower, min(maxCol, cols))
+            return lower < upper ? lower..<upper : nil
+        }
+
+        let firstRow = min (start.row, end.row)
+        let lastRow = max (start.row, end.row)
+        guard row >= firstRow, row <= lastRow else {
+            return nil
+        }
+
+        let lowerColumn: Int
+        let upperColumn: Int
+        if start.row == end.row, row == start.row {
+            if start.col < end.col {
+                lowerColumn = start.col
+                upperColumn = end.col + (end.col == cols - 1 ? 1 : 0)
+            } else if start.col > end.col {
+                lowerColumn = end.col
+                upperColumn = start.col
+            } else {
+                return nil
+            }
+        } else if start.row < end.row {
+            if row == start.row {
+                lowerColumn = start.col
+                upperColumn = cols
+            } else if row == end.row {
+                lowerColumn = 0
+                upperColumn = end.col + (end.col == cols - 1 ? 1 : 0)
+            } else {
+                lowerColumn = 0
+                upperColumn = cols
+            }
+        } else if end.row < start.row {
+            if row == end.row {
+                lowerColumn = end.col
+                upperColumn = cols
+            } else if row == start.row {
+                lowerColumn = 0
+                upperColumn = start.col + (start.col == cols - 1 ? 1 : 0)
+            } else {
+                lowerColumn = 0
+                upperColumn = cols
+            }
+        } else {
+            return nil
+        }
+
+        let lowerBound = max (0, min (lowerColumn, cols))
+        let upperBound = max (lowerBound, min (upperColumn, cols))
+        guard lowerBound < upperBound else {
+            return nil
+        }
+        return lowerBound..<upperBound
     }
     
     /**
      * Controls whether the selection is active or not.   Changing the value will invoke the `selectionChanged`
      * method on the terminal's delegate if the state changes.
      */
-    var _active: Bool = false
+    /// Backing store for ``active``.
+    ///
+    /// The observer keeps `Terminal`'s active-selection count in step. That
+    /// count is what lets the scroll path skip the selection registry entirely
+    /// while nothing is selected, which is the common case and used to cost a
+    /// weak load per scrolled line. Property observers do not run for the
+    /// assignment in `init`, which is correct here: the terminal's count starts
+    /// at zero and so does this flag.
+    var _active: Bool = false {
+        didSet {
+            guard _active != oldValue else { return }
+            terminal.selectionActiveDidChange (nowActive: _active)
+        }
+    }
     public var active: Bool {
         get {
             return _active
@@ -80,6 +351,10 @@ public class SelectionService: CustomDebugStringConvertible {
      */
     var wordSelectionAnchor: (start: Position, end: Position)?
 
+    /// The row that started a row selection. It stays fixed while the pointer
+    /// moves across that row.
+    var rowSelectionAnchor: Int?
+
     /**
      * Returns the selection ending point in buffer coordinates
      */
@@ -100,8 +375,10 @@ public class SelectionService: CustomDebugStringConvertible {
     public func startSelection (row: Int, col: Int)
     {
         setSoftStart(row: row, col: col)
+        selectingRows = false
         selectionMode = .character
         wordSelectionAnchor = nil
+        rowSelectionAnchor = nil
         setActiveAndNotify()
     }
         
@@ -126,6 +403,7 @@ public class SelectionService: CustomDebugStringConvertible {
         self.end = eclamped
         selectionMode = .character
         wordSelectionAnchor = nil
+        rowSelectionAnchor = nil
 
         setActiveAndNotify()
     }
@@ -139,6 +417,7 @@ public class SelectionService: CustomDebugStringConvertible {
         selectingRows = false
         selectionMode = .character
         wordSelectionAnchor = nil
+        rowSelectionAnchor = nil
         setActiveAndNotify()
     }
     
@@ -178,16 +457,10 @@ public class SelectionService: CustomDebugStringConvertible {
      */
     public func shiftExtend (row: Int, col: Int)
     {
-        var newPos = Position  (col: col, row: row + terminal.displayBuffer.yDisp)
-        if selectingRows {
-            if Position.compare(start, newPos) == .before {
-                newPos.col = terminal.cols - 1
-            } else {
-                newPos.col = 0
-            }
-        }
-        print("SelectinRows=\(selectingRows)")
-        shiftExtend (bufferPosition: newPos)
+        shiftExtend(bufferPosition: Position(
+            col: col,
+            row: row + terminal.displayBuffer.yDisp
+        ))
     }
     
     /**
@@ -201,6 +474,11 @@ public class SelectionService: CustomDebugStringConvertible {
     public func shiftExtend (bufferPosition newEnd: Position) {
         if selectionMode == .rectangular {
             end = clamp(terminal.displayBuffer, newEnd)
+            setActiveAndNotify()
+            return
+        }
+        if selectionMode == .row {
+            extendRowSelection(through: newEnd.row)
             setActiveAndNotify()
             return
         }
@@ -273,6 +551,11 @@ public class SelectionService: CustomDebugStringConvertible {
             setActiveAndNotify()
             return
         }
+        if selectionMode == .row {
+            setRowSelection(from: pivot.row, through: bufferPosition.row)
+            setActiveAndNotify()
+            return
+        }
 
         var adjustedPosition = bufferPosition
 
@@ -313,6 +596,11 @@ public class SelectionService: CustomDebugStringConvertible {
     public func dragExtend (bufferPosition: Position) {
         if selectionMode == .rectangular {
             end = clamp(terminal.displayBuffer, bufferPosition)
+            setActiveAndNotify()
+            return
+        }
+        if selectionMode == .row {
+            extendRowSelection(through: bufferPosition.row)
             setActiveAndNotify()
             return
         }
@@ -385,7 +673,17 @@ public class SelectionService: CustomDebugStringConvertible {
         selectingRows = true
         selectionMode = .row
         wordSelectionAnchor = nil
+        rowSelectionAnchor = row
         setActiveAndNotify()
+    }
+
+    private func extendRowSelection(through row: Int) {
+        setRowSelection(from: rowSelectionAnchor ?? start.row, through: row)
+    }
+
+    private func setRowSelection(from anchorRow: Int, through targetRow: Int) {
+        start = Position(col: 0, row: min(anchorRow, targetRow))
+        end = Position(col: terminal.cols - 1, row: max(anchorRow, targetRow))
     }
 
     private func character (at position: Position, in buffer: Buffer) -> Character
@@ -593,7 +891,44 @@ public class SelectionService: CustomDebugStringConvertible {
         }
         selectionMode = .word
         wordSelectionAnchor = (start, end)
+        rowSelectionAnchor = nil
+        selectingRows = false
         setActiveAndNotify()
+    }
+
+    /// Returns the word at a buffer-relative position without changing the
+    /// current selection. The word rules match word selection.
+    func word(at uncheckedPosition: Position, in buffer: Buffer) -> (text: String, start: Position)? {
+        guard uncheckedPosition.col >= 0, uncheckedPosition.col < terminal.cols,
+              uncheckedPosition.row >= 0, uncheckedPosition.row < buffer.lines.count else {
+            return nil
+        }
+
+        let position = uncheckedPosition
+        let includes: (Character) -> Bool = { character in
+            character.isLetter || character.isNumber || character == "." ||
+                character == "_" || character == "-"
+        }
+        guard includes(character(at: position, in: buffer)) else { return nil }
+
+        var first = position.col
+        while first > 0,
+              includes(character(at: Position(col: first - 1, row: position.row), in: buffer)) {
+            first -= 1
+        }
+
+        var last = position.col + 1
+        while last < terminal.cols,
+              includes(character(at: Position(col: last, row: position.row), in: buffer)) {
+            last += 1
+        }
+
+        let word = terminal.getText(
+            start: Position(col: first, row: position.row),
+            end: Position(col: last, row: position.row),
+            buffer: buffer)
+        guard !word.isEmpty else { return nil }
+        return (text: word, start: Position(col: first, row: position.row))
     }
 
     /**
@@ -605,6 +940,8 @@ public class SelectionService: CustomDebugStringConvertible {
             active = false
             selectionMode = .character
             wordSelectionAnchor = nil
+            rowSelectionAnchor = nil
+            selectingRows = false
         }
     }
     

@@ -40,14 +40,13 @@ terminalView.nativeBackgroundColor = NSColor.black    // or UIColor.black
 
 ### ANSI Palette
 
-To install a custom 256-color palette, use ``Terminal/installPalette(colors:)``.
-The array must contain exactly 256 ``Color`` values — the first 16 are the
-standard ANSI colors, 16-231 are the 6x6x6 color cube, and 232-255 are the
-greyscale ramp:
+To install custom base ANSI colors on a view, use
+``TerminalView/installColors(_:)``.
+The array must contain exactly 16 ``Color`` values. SwiftTerm derives entries
+16 through 255 from these colors and the selected ANSI 256 strategy:
 
 ```swift
-let terminal = terminalView.getTerminal()
-terminal.installPalette(colors: myCustomPalette)
+terminalView.installColors(myCustomPalette)
 ```
 
 ### Selection and Cursor Colors
@@ -177,6 +176,22 @@ let options = TerminalOptions(
 )
 ```
 
+BiDi left/right arrow swapping requires opt-in. Set its initial value when you
+create the terminal, or change the live terminal state later:
+
+```swift
+let options = TerminalOptions(initialBidiArrowKeySwap: true)
+let terminal = Terminal(delegate: delegate, options: options)
+
+terminal.bidiArrowKeySwap = false
+```
+
+A terminal reset restores `initialBidiArrowKeySwap`. Terminal applications can
+also change the live state with DEC private mode 1243.
+
+For the full bidirectional text support — presentation modes, escape
+sequences, and the rendering pipeline — see <doc:BiDi>.
+
 Key options:
 
 | Property | Default | Description |
@@ -188,7 +203,10 @@ Key options:
 | `cursorStyle` | `.blinkBlock` | Initial cursor appearance |
 | `screenReaderMode` | `false` | Accessibility mode |
 | `enableSixelReported` | `true` | Advertise Sixel support to applications |
-| `kittyImageCacheLimitBytes` | 320 MB | Memory limit for Kitty image cache |
+| `initialBidiState` | implicit, autodetect, LTR | BiDi state for new paragraphs after startup or reset |
+| `maximumBidiParagraphRows` | `120` | Maximum rows processed as one BiDi paragraph |
+| `initialBidiArrowKeySwap` | `false` | Initial state for BiDi left/right arrow swapping |
+| `kittyGraphics` | 10 MB per screen, direct media only | Kitty storage and local-media policy |
 | `ansi256PaletteStrategy` | `.base16Lab` | 256-color palette generation strategy |
 
 The `.base16Lab` and `.base16LabHarmonious` strategies are based on the
