@@ -122,10 +122,12 @@ final class AlternateScrollModeTests: TerminalDelegate {
                 "negative AppKit delta must report mouse button 5")
     }
 
-    /// The point of tracking the mode is that an application can turn the
-    /// translation off: with 1007 reset, the wheel must produce nothing on the
-    /// alternate screen (there is no scrollback there to move either).
-    @MainActor @Test func viewOnlyTranslatesWheelWhileModeIsSet() {
+    /// Scape fork: alternate-screen wheel events translate to cursor keys
+    /// REGARDLESS of DECSET 1007 — pagers/TUIs that never enable the mode
+    /// (less, man, vim without mouse opt-ins) still scroll with the wheel.
+    /// Upstream drops the event when the mode is reset; the fork ships
+    /// xterm's alternateScroll resource permanently on.
+    @MainActor @Test func viewTranslatesWheelOnAlternateScreenRegardlessOfMode() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
         let delegate = WheelCapturingDelegate()
         view.terminalDelegate = delegate
@@ -142,13 +144,16 @@ final class AlternateScrollModeTests: TerminalDelegate {
         view.terminal.feed(text: "\u{1b}[?1007l")
         delegate.sent = []
         view.scrollWheel(with: wheel)
-        #expect(delegate.sent.isEmpty, "mode reset: the wheel must send nothing")
+        #expect(delegate.sent == [Array(EscapeSequences.moveDownNormal)],
+                "mode reset: the fork still moves the cursor (unconditional alternate-scroll)")
     }
 
-    /// Suppressed motion must not be banked: trackpad deltas are accumulated
-    /// across events, so scrolling while 1007 is reset has to leave nothing
-    /// behind for the first event after the mode comes back to spend.
-    @MainActor @Test func suppressedScrollingDoesNotBankMotionForLater() {
+    /// Scape fork companion to the unconditional cursor-keys route: sub-line
+    /// trackpad deltas BANK on the alternate screen (there is no 1007-reset
+    /// suppressed state to discard them in), so gentle scrolling accumulates
+    /// into whole cursor keys instead of being dropped — the IT-794
+    /// dead-zone fix, alt-screen edition.
+    @MainActor @Test func alternateScreenSubLineDeltasAccumulateIntoCursorKeys() {
         let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
         let delegate = WheelCapturingDelegate()
         view.terminalDelegate = delegate
@@ -165,14 +170,17 @@ final class AlternateScrollModeTests: TerminalDelegate {
             return
         }
 
-        for _ in 0..<5 {
-            view.scrollWheel(with: wheel)
-        }
-        #expect(delegate.sent.isEmpty, "mode reset: nothing may be sent while suppressed")
-
-        view.terminal.feed(text: "\u{1b}[?1007h")
         view.scrollWheel(with: wheel)
         #expect(delegate.sent.isEmpty, "a single sub-line delta must not move the cursor on its own")
+
+        for _ in 0..<4 {
+            view.scrollWheel(with: wheel)
+        }
+        // 5 × 0.9 lines = 4.5 lines banked → exactly 4 whole cursor keys.
+        #expect(delegate.sent.count == 4,
+                "banked sub-line deltas must emit one key per whole line crossed")
+        #expect(delegate.sent.allSatisfy { $0 == Array(EscapeSequences.moveDownNormal) },
+                "every emitted key is a cursor-down")
     }
 
     @MainActor @Test func classicMouseWheelEventSendsOneReport() async {

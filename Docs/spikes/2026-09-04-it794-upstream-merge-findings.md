@@ -118,6 +118,37 @@ The fork's entire `scrollWheel` rewrite is **DROPPED** in favor of upstream #657
   includes every post-conflict fix in this record).
 - SelectionTests: 9 `testRectangular*` + mode-reset tests present and green.
 
+## Codex-gate fixes (post-merge, same branch)
+
+The codex review (`docs/spikes/2026-09-04-it794-codex-review.md`) confirmed the
+reconciliation calls above and raised two blockers, both fixed on this branch:
+
+1. **Unconditional alternate-screen wheel forwarding RESTORED.** The original
+   merge classified the fork's alt-screen wheel→arrow behavior as superseded by
+   upstream's `.cursorKeys` route — wrong: upstream routes `.cursorKeys` only
+   when DECSET 1007 is set and DROPS the event otherwise, regressing pagers
+   that never enable 1007 (less, man, vim without mouse opt-ins). The fork's
+   `WheelRoute` decision now returns `.cursorKeys` for any alternate-screen
+   event that mouse reporting doesn't consume, 1007 or not (xterm
+   alternateScroll, permanently on; `WheelReportBudget` still bounds floods).
+   Upstream's two 1007-reset-suppression tests asserted the dropped-event
+   behavior and were rewritten to pin the fork behavior
+   (`viewTranslatesWheelOnAlternateScreenRegardlessOfMode`,
+   `alternateScreenSubLineDeltasAccumulateIntoCursorKeys`). Verified at the
+   NSEvent level (synthesized wheel through the real `scrollWheel` with
+   `1049h` + `1007l` — exactly a pager's state); live less/man check is in the
+   Phase-3 QA script.
+2. **Selection auto-scroll made atomic under `terminalLock`.**
+   `scrollingTimerElapsed` read `selection.active`, hit-tested via a separate
+   lock hold, then called `selection.dragExtend` unlocked — racing the
+   off-main feed pipeline's buffer/reflow/selection mutation. Upstream-
+   inherited, blocking under the newly adopted locking architecture. Now one
+   `withTerminal` critical section (active check + `calculateMouseHitLocked` +
+   `dragExtend`); the viewport `scrollUp/Down` calls stay outside (they take
+   the lock themselves), and `dragExtend`'s notify path is safe under the lock
+   (`setActiveAndNotify` → `selectionChanged` → `onMain` always
+   `DispatchQueue.main.async`, never synchronous re-entry).
+
 ## Follow-ups
 
 - Phase 2 (IT-794): trace built-in trackpad with Scape's `SCAPE_SCROLL_TRACE`

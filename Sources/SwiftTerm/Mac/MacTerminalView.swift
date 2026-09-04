@@ -3317,9 +3317,18 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             scrollDown(lines: autoScrollDelta)
         }
         // Extend the selection to the pointer's position under the new viewport.
-        if selection.active, let point = lastSelectionDragPoint {
-            let hit = calculateMouseHit(at: point).grid
-            selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
+        // One critical section for the active check, hit test, and extension:
+        // the IO pipeline mutates buffer/selection off-main under terminalLock,
+        // so a hit computed in a separate lock hold could extend against a
+        // different buffer state than the one it lands on (Scape fork; codex
+        // review 2026-09-04 finding 2). calculateMouseHitLocked, not
+        // calculateMouseHit — the lock is not re-entrant.
+        if let point = lastSelectionDragPoint {
+            withTerminal { _ in
+                guard selection.active else { return }
+                let hit = calculateMouseHitLocked(at: point).grid
+                selection.dragExtend(bufferPosition: Position(col: hit.col, row: hit.row))
+            }
         }
         setNeedsDisplay(bounds)
     }
@@ -3865,14 +3874,22 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
                 return .mouse
             }
             if terminal.isDisplayBufferAlternate {
-                return terminal.alternateScrollMode ? .cursorKeys : .none
+                // Scape fork: route to cursor keys on the alternate screen even
+                // when DECSET 1007 is off. Upstream drops the event when the
+                // mode is reset (protocol-correct), but the fork has always
+                // forwarded wheel → Up/Down for alt-screen pagers/TUIs that
+                // never enable 1007 (less, man, vim without mouse opt-ins) —
+                // xterm's alternateScroll resource, permanently on. The
+                // WheelReportBudget still bounds the keystroke flood.
+                return .cursorKeys
             }
             return .localScrollback
         }
 
         // A suppressed event must not bank a partial trackpad row and hand it to a later route.
-        // This includes Alternate Scroll Mode being reset and a local-handling modifier being
-        // held over the alternate buffer, which has no local scrollback.
+        // With the Scape fork's unconditional alternate-screen cursor-keys route above, the
+        // only suppression left is a local-handling modifier held over the alternate buffer,
+        // which has no local scrollback.
         if scrollRoute == .none {
             scrollAccumulator.reset()
             return
