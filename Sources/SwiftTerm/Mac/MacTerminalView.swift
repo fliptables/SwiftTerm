@@ -3852,7 +3852,9 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     private static let logsMouseInput =
         ProcessInfo.processInfo.environment["SWIFTTERM_MOUSE_LOG"] == "1"
 
-    public override func scrollWheel(with event: NSEvent) {
+    // Scape fork: `open`, not `public` — the host app overrides scrollWheel
+    // (redraw-throttle lift + diagnostic tracing) and calls super.
+    open override func scrollWheel(with event: NSEvent) {
         // Preserves the previous `deltaY == 0` early exit, restated against the
         // delta this method now reads. Without it a zero delta would fall into
         // the non-precise branch below and be turned into a spurious -1 line.

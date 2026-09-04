@@ -85,3 +85,40 @@ edge dragging.
   already hold `terminalLock`; Scape's Phase 3 migration must wrap its external
   search calls in `withTerminal` rather than calling `view.search.find*`
   directly.
+
+## Round 2 re-review — `57bbd81..175d386`
+
+Verdict: **CLEAR**. Both blockers are closed; the reviewed delta introduces no
+new finding.
+
+- `Sources/SwiftTerm/Mac/MacTerminalView.swift:3866-3886`: route selection
+  still gives local-handling modifiers first refusal, then sends every
+  mouse-reporting mode (`mouseMode != .off`) to `.mouse`, then sends every
+  remaining alternate-screen event to `.cursorKeys` without consulting DECSET
+  1007. Normal-screen events still fall through to `.localScrollback`.
+  `WheelReportBudget` remains on both the mouse-report and cursor-key paths.
+- `Tests/SwiftTermTests/AlternateScrollModeTests.swift:130-149`: the rewritten
+  mode test enters the alternate screen with no mouse mode, proves one cursor
+  key is emitted before reset, explicitly resets 1007, clears captured output,
+  and proves exactly one cursor key is still emitted. Its event-construction
+  failure records a test issue, so it cannot pass vacuously.
+- `Tests/SwiftTermTests/AlternateScrollModeTests.swift:156-183`: the precise
+  test enters alternate screen with 1007 explicitly reset, constructs a
+  precise delta below one cell, proves the first event emits nothing, then
+  proves five accumulated events emit exactly four Down keys. It pins both the
+  unconditional route and route-scoped sub-line accumulation, and its fixture
+  failures also record test issues.
+- `Sources/SwiftTerm/Mac/MacTerminalView.swift:3314-3333`: viewport
+  `scrollUp`/`scrollDown` completes before the selection critical section. The
+  active check, locked hit test, and `dragExtend` read-modify-write now occur in
+  one `withTerminal` hold. This is the same locking shape as
+  `mouseDragged` at lines 3525-3549.
+- The selection notification cannot synchronously re-enter the lock in this
+  host: `dragExtend` calls `setActiveAndNotify`, which invokes the view's
+  `selectionChanged`; `MacTerminalView.swift:3145-3152` calls `onMain`, and
+  `AppleTerminalView.swift:1685-1700` unconditionally uses
+  `DispatchQueue.main.async` even when already on main.
+
+Focused verification: `swift test --filter AlternateScrollModeTests` passed
+all 16 tests. The noted unrelated `HeadlessTerminalTests` intermittent was not
+encountered or attributed to this delta.
