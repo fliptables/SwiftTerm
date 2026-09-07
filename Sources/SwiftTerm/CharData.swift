@@ -475,6 +475,43 @@ public struct CharData: CustomDebugStringConvertible, Sendable {
         getText().first ?? " "
     }
 
+    /// Scape fork (IT-824): byte-budgeted variant of `getText` that never
+    /// materializes more than `maxUTF8Bytes` of this cell's content. The
+    /// combining-scalar append path bounds a cell only by Swift grapheme
+    /// segmentation, so one cell's stored scalars are unbounded in principle;
+    /// this walks them with a running UTF-8 width FIRST (no allocation) and
+    /// returns nil the moment the budget would be exceeded, so a caller
+    /// taking a bounded snapshot can refuse a pathological cell before ever
+    /// building its string. Mirrors `getText()`'s fallbacks exactly: an
+    /// invalid stored scalar degrades to " ", as does a negative/invalid
+    /// simple code.
+    public func getText (maxUTF8Bytes: Int) -> String?
+    {
+        func utf8Width (_ v: UInt32) -> Int {
+            v < 0x80 ? 1 : (v < 0x800 ? 2 : (v < 0x1_0000 ? 3 : 4))
+        }
+        if let values = graphemeScalarValues {
+            var bytes = 0
+            for value in values {
+                guard Unicode.Scalar(value) != nil else {
+                    return maxUTF8Bytes >= 1 ? " " : nil
+                }
+                bytes += utf8Width(value)
+                if bytes > maxUTF8Bytes { return nil }
+            }
+            var text = ""
+            for value in values {
+                guard let scalar = Unicode.Scalar(value) else { return " " }
+                text.unicodeScalars.append(scalar)
+            }
+            return text
+        }
+        if code >= 0, let scalar = Unicode.Scalar(UInt32(code)) {
+            return utf8Width(UInt32(code)) <= maxUTF8Bytes ? String(scalar) : nil
+        }
+        return maxUTF8Bytes >= 1 ? " " : nil
+    }
+
     /// Returns all text stored in this cell. This can contain a Unicode
     /// grapheme that the host Swift runtime segments into multiple Characters.
     public func getText () -> String
