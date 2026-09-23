@@ -163,6 +163,36 @@ struct TerminalSnapshotTests {
         #expect(snapshot.rows.first?.line.cellArena === capturedArena)
     }
 
+    /// IT-1016: the live attribute table grows by copying, but a snapshot
+    /// arena never reallocates. A refresh after growth takes a new snapshot
+    /// arena, and skipped rows keep decoding through the old one.
+    @Test func refreshAfterAttributeTableGrowthKeepsSkippedRowsDecoding() throws {
+        let view = makeView()
+        view.feed(text: "\u{1b}[38;2;1;2;3mA\u{1b}[0m")
+        let snapshot = TerminalSnapshot()
+        #expect(refresh(snapshot, from: view) == .refreshed)
+        let firstArena = try #require(snapshot.rows.first).line.cellArena
+
+        // Overwrite one cell on row 2 with 600 distinct styles, so the live
+        // table outgrows its first 256 slots while row 1 stays untouched.
+        var input = ""
+        for value in 0..<600 {
+            input += "\u{1b}[2;1H\u{1b}[38;2;\(value >> 8);\(value & 0xff);9mB"
+        }
+        view.feed(text: input)
+        #expect(refresh(snapshot, from: view) == .refreshed)
+
+        let top = try #require(snapshot.rows.first)
+        let second = snapshot.rows[1]
+        #expect(top.line.cellArena === firstArena)
+        #expect(second.line.cellArena !== firstArena)
+        #expect(top.line.packedView(at: 0).attribute.fg == .trueColor(red: 1, green: 2, blue: 3))
+        #expect(second.line.packedView(at: 0).attribute.fg
+            == .trueColor(red: UInt8(599 >> 8), green: UInt8(599 & 0xff), blue: 9))
+        #expect(text(in: top, cols: snapshot.cols).hasPrefix("A"))
+        #expect(text(in: second, cols: snapshot.cols).hasPrefix("B"))
+    }
+
 #if DEBUG
     @Test func unchangedRowsUseGenerationSkip() {
         let view = makeView()

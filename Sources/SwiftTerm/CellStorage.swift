@@ -311,8 +311,22 @@ final class CellArena {
     /// them. New clusters degrade to their first scalar after this limit.
     private static let defaultGraphemeCapacity = Int(UInt16.max)
 
+    /// Slots a live arena allocates up front. Most terminals intern a few
+    /// hundred styles at most, so the table starts small and doubles on
+    /// demand instead of reserving all 65,536 slots (896 KB) per arena.
+    static let initialAttributeSlots = 256
+
+    /// Largest identifier `intern(attribute:)` may hand out.
     private let attributeCapacity: Int
-    private let attributes: UnsafeMutablePointer<Attribute>
+    /// Slots currently allocated at `attributes`. A live arena grows this by
+    /// doubling up to `attributeCapacity + 1`. A snapshot arena never grows.
+    private var attributeSlots: Int
+    private var attributes: UnsafeMutablePointer<Attribute>
+    /// Tables a live arena outgrew, with their initialized counts. They are
+    /// freed only in `deinit`, so an attribute table this arena ever
+    /// exposed stays readable for the arena's lifetime. The retired tables
+    /// together are smaller than the current one.
+    private var retiredAttributeTables: [(table: UnsafeMutablePointer<Attribute>, count: Int)] = []
     private var attributeCountValue = 1
     private var attributeIdentifiers: [InternedAttributeKey: UInt16] = [:]
 
@@ -338,7 +352,8 @@ final class CellArena {
         snapshotSourceIdentity = nil
         isSnapshotCopy = false
         attributeCapacity = min(max(styleCapacity, 0), Int(UInt16.max))
-        attributes = .allocate(capacity: attributeCapacity + 1)
+        attributeSlots = min(Self.initialAttributeSlots, attributeCapacity + 1)
+        attributes = .allocate(capacity: attributeSlots)
         attributes.initialize(to: CharData.defaultAttr)
         attributeIdentifiers[InternedAttributeKey(CharData.defaultAttr)] = 0
 
@@ -359,11 +374,15 @@ final class CellArena {
         isSnapshotCopy = true
 
         // Keep the pointer stable for the lifetime of this snapshot arena.
-        // A terminal arena has a fixed identifier capacity, so later refreshes
-        // can append only the newly published entries without copying the
-        // existing prefix again.
+        // The snapshot takes the source's current slot count and never grows,
+        // so later refreshes can append only the newly published entries
+        // without copying the existing prefix again. When the live arena
+        // grows past these slots, `synchronizeSnapshotPrefix` refuses and the
+        // caller takes a fresh snapshot. Rows that still refer to this arena
+        // keep it, and its pointer, alive.
         attributeCapacity = source.attributeCapacity
-        attributes = .allocate(capacity: attributeCapacity + 1)
+        attributeSlots = source.attributeSlots
+        attributes = .allocate(capacity: attributeSlots)
         attributes.initialize(from: source.attributes,
                               count: source.attributeCountValue)
         attributeCountValue = source.attributeCountValue
@@ -409,7 +428,7 @@ final class CellArena {
               snapshotSourceIdentity === source.identity,
               source.attributeCountValue >= attributeCountValue,
               source.graphemeCountValue >= graphemeCountValue,
-              source.attributeCountValue <= attributeCapacity + 1,
+              source.attributeCountValue <= attributeSlots,
               source.graphemeCountValue <= UInt32(graphemeCapacity)
         else {
             return false
@@ -464,6 +483,10 @@ final class CellArena {
     deinit {
         attributes.deinitialize(count: attributeCountValue)
         attributes.deallocate()
+        for retired in retiredAttributeTables {
+            retired.table.deinitialize(count: retired.count)
+            retired.table.deallocate()
+        }
 
         for blockIndex in 0..<allocatedGraphemeBlockCount {
             if let block = graphemeBlocks[blockIndex] {
@@ -489,6 +512,9 @@ final class CellArena {
         guard attributeCountValue <= attributeCapacity else {
             return nil
         }
+        if attributeCountValue == attributeSlots {
+            growAttributeTable()
+        }
 
         let identifier = UInt16(attributeCountValue)
         attributes.advanced(by: attributeCountValue).initialize(to: attribute)
@@ -496,6 +522,24 @@ final class CellArena {
         attributeIdentifiers[key] = identifier
         return identifier
     }
+
+    /// Copy-on-grow for live arenas. Identifiers are indices, so they stay
+    /// valid in the larger table. The outgrown table is retired, not freed.
+    private func growAttributeTable() {
+        precondition(!isSnapshotCopy, "Snapshot cell arenas never grow")
+        let newSlots = min(attributeSlots * 2, attributeCapacity + 1)
+        precondition(newSlots > attributeSlots, "The cell arena attribute table is full")
+        let grown = UnsafeMutablePointer<Attribute>.allocate(capacity: newSlots)
+        grown.initialize(from: attributes, count: attributeCountValue)
+        retiredAttributeTables.append((attributes, attributeCountValue))
+        attributes = grown
+        attributeSlots = newSlots
+    }
+
+#if DEBUG
+    var attributeSlotCount: Int { attributeSlots }
+    var retiredAttributeTableCount: Int { retiredAttributeTables.count }
+#endif
 
     /// Creates a scalar cell from an attribute identifier that is already
     /// owned by this arena. This is the main parser path.
@@ -559,7 +603,11 @@ final class CellArena {
 
     @inline(__always)
     func attribute(for identifier: UInt16) -> Attribute {
-        attributes[Int(identifier)]
+        // The table holds only `attributeSlots` entries, not every UInt16.
+        // A cell may carry only identifiers this arena published.
+        assert(Int(identifier) < attributeCountValue,
+               "Attribute identifier was not published by this cell arena")
+        return attributes[Int(identifier)]
     }
 
     func intern(grapheme scalars: [UInt32]) -> UInt32? {
