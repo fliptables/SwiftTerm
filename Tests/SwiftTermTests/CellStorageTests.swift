@@ -503,6 +503,20 @@ struct CellStorageTests {
         #expect(arena.attributeSlotCount == 1_001)
     }
 
+    @Test func defaultArenaGrowsToTheFullIdentifierSpace() throws {
+        let arena = CellArena()
+        for value in 1...Int(UInt16.max) {
+            _ = try #require(arena.intern(attribute: distinctAttribute(value)))
+        }
+        // 256 -> 512 -> ... -> 65,536: eight doublings, no clamp needed.
+        #expect(arena.attributeSlotCount == Int(UInt16.max) + 1)
+        #expect(arena.retiredAttributeTableCount == 8)
+        let unseen = Attribute(fg: .trueColor(red: 0, green: 0, blue: 8),
+                               bg: .defaultColor, style: .none)
+        #expect(arena.intern(attribute: unseen) == nil)
+        #expect(arena.attribute(for: UInt16.max) == distinctAttribute(Int(UInt16.max)))
+    }
+
     @Test func tinyStyleCapacityNeverAllocatesMoreThanItsIdentifierSpace() {
         #expect(CellArena(styleCapacity: 0).attributeSlotCount == 1)
         #expect(CellArena(styleCapacity: 3).attributeSlotCount == 4)

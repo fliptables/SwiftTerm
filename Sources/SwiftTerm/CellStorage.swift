@@ -603,11 +603,15 @@ final class CellArena {
 
     @inline(__always)
     func attribute(for identifier: UInt16) -> Attribute {
-        // The table holds only `attributeSlots` entries, not every UInt16.
+        let index = Int(identifier)
         // A cell may carry only identifiers this arena published.
-        assert(Int(identifier) < attributeCountValue,
+        assert(index < attributeCountValue,
                "Attribute identifier was not published by this cell arena")
-        return attributes[Int(identifier)]
+        // The table holds only `attributeSlots` entries, not every UInt16,
+        // so a stray identifier must not read past the allocation in release
+        // builds either.
+        guard index < attributeSlots else { return CharData.defaultAttr }
+        return attributes[index]
     }
 
     func intern(grapheme scalars: [UInt32]) -> UInt32? {
