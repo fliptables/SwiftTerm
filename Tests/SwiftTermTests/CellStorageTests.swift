@@ -472,6 +472,130 @@ struct CellStorageTests {
         #expect(empty.packedAttribute(at: 0) == CharData.defaultAttr)
     }
 
+    private func distinctAttribute(_ value: Int) -> Attribute {
+        Attribute(fg: .trueColor(red: UInt8(value >> 8), green: UInt8(value & 0xff), blue: 7),
+                  bg: .defaultColor, style: .none)
+    }
+
+#if DEBUG
+    @Test func liveArenaAttributeTableStartsSmallAndDoublesToCapacity() throws {
+        let arena = CellArena(styleCapacity: 1_000)
+        #expect(arena.attributeSlotCount == CellArena.initialAttributeSlots)
+        #expect(arena.retiredAttributeTableCount == 0)
+
+        // Slot 0 is the default style, so 255 more fill the first table.
+        for value in 1..<CellArena.initialAttributeSlots {
+            _ = try #require(arena.intern(attribute: distinctAttribute(value)))
+        }
+        #expect(arena.attributeSlotCount == CellArena.initialAttributeSlots)
+
+        _ = try #require(arena.intern(attribute: distinctAttribute(256)))
+        #expect(arena.attributeSlotCount == 512)
+        #expect(arena.retiredAttributeTableCount == 1)
+
+        for value in 257...1_000 {
+            _ = try #require(arena.intern(attribute: distinctAttribute(value)))
+        }
+        // The last doubling is clamped to the identifier limit, not 1,024.
+        #expect(arena.attributeSlotCount == 1_001)
+        #expect(arena.retiredAttributeTableCount == 2)
+        #expect(arena.intern(attribute: distinctAttribute(1_001)) == nil)
+        #expect(arena.attributeSlotCount == 1_001)
+    }
+
+    @Test func defaultArenaGrowsToTheFullIdentifierSpace() throws {
+        let arena = CellArena()
+        for value in 1...Int(UInt16.max) {
+            _ = try #require(arena.intern(attribute: distinctAttribute(value)))
+        }
+        // 256 -> 512 -> ... -> 65,536: eight doublings, no clamp needed.
+        #expect(arena.attributeSlotCount == Int(UInt16.max) + 1)
+        #expect(arena.retiredAttributeTableCount == 8)
+        let unseen = Attribute(fg: .trueColor(red: 0, green: 0, blue: 8),
+                               bg: .defaultColor, style: .none)
+        #expect(arena.intern(attribute: unseen) == nil)
+        #expect(arena.attribute(for: UInt16.max) == distinctAttribute(Int(UInt16.max)))
+    }
+
+    @Test func tinyStyleCapacityNeverAllocatesMoreThanItsIdentifierSpace() {
+        #expect(CellArena(styleCapacity: 0).attributeSlotCount == 1)
+        #expect(CellArena(styleCapacity: 3).attributeSlotCount == 4)
+    }
+#endif
+
+    @Test func attributeIdentifiersStayStableAcrossGrowth() throws {
+        let arena = CellArena()
+        var identifiers: [UInt16] = []
+        for value in 0..<3_000 {
+            identifiers.append(try #require(arena.intern(attribute: distinctAttribute(value))))
+        }
+        #expect(identifiers == (0..<3_000).map { UInt16($0 + 1) })
+
+        for (value, identifier) in identifiers.enumerated() {
+            #expect(arena.attribute(for: identifier) == distinctAttribute(value))
+            #expect(arena.intern(attribute: distinctAttribute(value)) == identifier)
+        }
+        #expect(arena.attribute(for: 0) == CharData.defaultAttr)
+    }
+
+    @Test func snapshotArenaKeepsItsTableWhenTheLiveArenaGrows() throws {
+        let arena = CellArena()
+        var identifiers: [UInt16] = []
+        for value in 0..<200 {
+            identifiers.append(try #require(arena.intern(attribute: distinctAttribute(value))))
+        }
+        let snapshot = arena.snapshotCopy()
+
+        // Growth that still fits the snapshot's slots extends it in place.
+        for value in 200..<255 {
+            identifiers.append(try #require(arena.intern(attribute: distinctAttribute(value))))
+        }
+        #expect(snapshot.synchronizeSnapshotPrefix(from: arena))
+        #expect(snapshot.attributeCount == 255)
+#if DEBUG
+        #expect(snapshot.attributeSlotCount == CellArena.initialAttributeSlots)
+#endif
+
+        // Growth past the snapshot's slots moves only the live table. The
+        // snapshot refuses to extend instead of reallocating, and every
+        // entry it already published still decodes.
+        for value in 255..<600 {
+            identifiers.append(try #require(arena.intern(attribute: distinctAttribute(value))))
+        }
+        #expect(!snapshot.synchronizeSnapshotPrefix(from: arena))
+        #expect(!snapshot.preservesEncoding(from: arena))
+        #expect(snapshot.attributeCount == 255)
+#if DEBUG
+        #expect(snapshot.attributeSlotCount == CellArena.initialAttributeSlots)
+#endif
+        for (value, identifier) in identifiers.prefix(255).enumerated() {
+            #expect(snapshot.attribute(for: identifier) == distinctAttribute(value))
+        }
+
+        // The replacement snapshot takes the grown table and every identifier.
+        let replacement = arena.snapshotCopy()
+        #expect(replacement.preservesEncoding(from: arena))
+        for (value, identifier) in identifiers.enumerated() {
+            #expect(replacement.attribute(for: identifier) == distinctAttribute(value))
+        }
+    }
+
+    @Test func linesKeepDecodingAcrossArenaGrowth() throws {
+        let arena = CellArena()
+        let early = BufferLine(cols: 2, arena: arena)
+        early[0] = CharData(attribute: distinctAttribute(1), code: 65)
+
+        let late = BufferLine(cols: 2, arena: arena)
+        for value in 2..<700 {
+            late[0] = CharData(attribute: distinctAttribute(value), code: 66)
+        }
+        #expect(arena.attributeCount == 699)
+
+        #expect(early[0].attribute == distinctAttribute(1))
+        #expect(late[0].attribute == distinctAttribute(699))
+        #expect(BufferLine(from: early)[0].attribute == distinctAttribute(1))
+    }
+
     @Test func terminalDegradesAfterAttributeArenaIsFull() {
         let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 2, rows: 2)
         var input = ""
