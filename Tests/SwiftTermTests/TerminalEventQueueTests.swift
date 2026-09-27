@@ -22,7 +22,7 @@ struct TerminalEventQueueTests {
     @Test @MainActor func backgroundPostsCollapseWhileMainIsBusy() {
         let box = Box()
         let queue = TerminalEventQueue()
-        queue.configure(onDrain: { box.append($0) },
+        queue.configure(onDrain: { event, _ in box.append(event) },
                         canDeliverInline: { false })
 
         let finished = DispatchSemaphore(value: 0)
@@ -52,7 +52,7 @@ struct TerminalEventQueueTests {
     @Test @MainActor func mainThreadPostsDeliverInline() {
         var seen: [TerminalEvent] = []
         let queue = TerminalEventQueue()
-        queue.configure(onDrain: { seen.append($0) },
+        queue.configure(onDrain: { event, _ in seen.append(event) },
                         canDeliverInline: { true })
 
         queue.post(.bell)
@@ -67,7 +67,7 @@ struct TerminalEventQueueTests {
         let deliverInline = Locked(false)
         var seen: [TerminalEvent] = []
         let queue = TerminalEventQueue()
-        queue.configure(onDrain: { seen.append($0) },
+        queue.configure(onDrain: { event, _ in seen.append(event) },
                         canDeliverInline: { deliverInline.withLock { $0 } })
 
         queue.post(.bufferActivated)      // queued, drain scheduled
@@ -83,7 +83,7 @@ struct TerminalEventQueueTests {
     @Test @MainActor func lockedViewDefersDelivery() {
         var seen: [TerminalEvent] = []
         let queue = TerminalEventQueue()
-        queue.configure(onDrain: { seen.append($0) },
+        queue.configure(onDrain: { event, _ in seen.append(event) },
                         canDeliverInline: { false })
 
         queue.post(.bell)
@@ -97,7 +97,7 @@ struct TerminalEventQueueTests {
     @Test @MainActor func drainWithNothingPendingIsHarmless() {
         let queue = TerminalEventQueue()
         var count = 0
-        queue.configure(onDrain: { _ in count += 1 },
+        queue.configure(onDrain: { _, _ in count += 1 },
                         canDeliverInline: { true })
         queue.drain()
         queue.drain()

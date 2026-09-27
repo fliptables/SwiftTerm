@@ -2301,12 +2301,12 @@ extension TerminalView {
                 ? 1
                 : Double(displayBuffer.yDisp) / Double(maxScrollback)
         }
-        onMain { [weak self] in
-            guard let self else { return }
-            self.updateScroller()
-            self.frameDriver.markDirty()
-            self.terminalDelegate?.scrolled(source: self, position: position)
-        }
+        // Coalesced (IT-1075): TUIs end a synchronized update on every frame,
+        // so this used to enqueue one main block per frame per terminal. The
+        // queue keeps at most one block outstanding and hands it the latest
+        // position; the drain (which always runs after the last post) does the
+        // scroller update, the markDirty for the final frame, and `scrolled`.
+        eventQueue.postSynchronizedOutputEnded(scrollPosition: position)
     }
 
     public nonisolated func setBackgroundColor(source: Terminal, color: Color) {
