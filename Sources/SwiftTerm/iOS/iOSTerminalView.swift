@@ -411,8 +411,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setupFrameDriver()
         frameDriver.setWindowAttachedOnMain(window != nil)
         eventQueue.configure(
-            onDrain: { [weak self] event in
-                self?.applyTerminalEvent(event)
+            onDrain: { [weak self] event, payload in
+                self?.applyTerminalEvent(event, payload: payload)
             },
             canDeliverInline: { [weak self] in
                 guard let self, let terminal = self.terminal else { return false }
@@ -3370,7 +3370,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     /// Applies one coalesced event. Main thread.
-    func applyTerminalEvent (_ event: TerminalEvent) {
+    func applyTerminalEvent (_ event: TerminalEvent, payload: TerminalEventPayload) {
         switch event {
         case .bufferActivated:
             resetManualScrollTracking()
@@ -3381,6 +3381,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             break
         case .bell:
             deliverBell()
+        case .synchronizedOutputEnded, .titleChanged:
+            applyCoalescedPayloadEvent(event, payload: payload)
         }
     }
 
@@ -3482,11 +3484,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     nonisolated open func setTerminalTitle(source: Terminal, title: String) {
-        let capturedTitle = title
-        onMain { [weak self] in
-            guard let self else { return }
-            self.terminalDelegate?.setTerminalTitle(source: self, title: capturedTitle)
-        }
+        // Coalesced (IT-1075): see the Mac view.
+        eventQueue.postTitle(title)
     }
   
     nonisolated open func sizeChanged(source: Terminal) {

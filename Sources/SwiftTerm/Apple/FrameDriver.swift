@@ -88,6 +88,13 @@ final class FrameDriverSignal: Sendable {
         publish([.displayLink])
     }
 
+    /// Test hook: consumes pending events and reports whether a dirty frame
+    /// was requested. Any outstanding delivery then finds nothing to do.
+    @MainActor
+    func takePendingDirtyForTesting() -> Bool {
+        takePendingEvents().contains(.dirty)
+    }
+
     @MainActor
     fileprivate func takePendingEvents() -> Events {
         state.withLock { state in
