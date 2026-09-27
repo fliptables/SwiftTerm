@@ -3381,12 +3381,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             break
         case .bell:
             deliverBell()
-        case .synchronizedOutputEnded:
-            updateScroller()
-            frameDriver.markDirty()
-            terminalDelegate?.scrolled(source: self, position: payload.synchronizedOutputScrollPosition)
-        case .titleChanged:
-            terminalDelegate?.setTerminalTitle(source: self, title: payload.title)
+        case .synchronizedOutputEnded, .titleChanged:
+            applyCoalescedPayloadEvent(event, payload: payload)
         }
     }
 

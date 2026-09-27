@@ -4139,12 +4139,8 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             }
         case .bell:
             deliverBell()
-        case .synchronizedOutputEnded:
-            updateScroller()
-            frameDriver.markDirty()
-            terminalDelegate?.scrolled(source: self, position: payload.synchronizedOutputScrollPosition)
-        case .titleChanged:
-            terminalDelegate?.setTerminalTitle(source: self, title: payload.title)
+        case .synchronizedOutputEnded, .titleChanged:
+            applyCoalescedPayloadEvent(event, payload: payload)
         }
     }
 

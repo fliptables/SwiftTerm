@@ -84,6 +84,9 @@ struct MainHopCoalescingTests {
         // Parsing holds the terminal lock, so nothing is delivered inline.
         #expect(view.eventQueue.posts == 2 * k)
         #expect(view.eventQueue.scheduledHops <= 1)
+        // The public diagnostics surface the coalesced hops (they no longer
+        // pass through onMain, so `mainHops` alone would read zero).
+        #expect(view.diagnostics.coalescedMainHops == view.eventQueue.scheduledHops)
         #expect(delegate.scrolled.isEmpty)
         #expect(delegate.titles.isEmpty)
 
@@ -137,6 +140,26 @@ struct MainHopCoalescingTests {
         view.eventQueue.drain()
         #expect(!view.withTerminal { $0.synchronizedOutputActive })
         #expect(delegate.scrolled.count == 2)
+    }
+
+    /// A sync-end followed by an alternate-screen switch in the same drain
+    /// window: one hop, one `scrolled`, and the view ends on the alternate
+    /// buffer with sync inactive. The reported position is the one captured
+    /// at the sync end (as before IT-1075); the scroller itself reads live
+    /// state in `updateScroller`.
+    @MainActor
+    @Test func syncEndThenBufferSwitchInOneWindowDeliversOnce() {
+        let delegate = RecordingDelegate()
+        let view = makeView(delegate)
+
+        view.feed(text: Self.frames(3) + "\(Self.esc)[?1049h")
+        #expect(view.eventQueue.scheduledHops == 1)
+        view.eventQueue.drain()
+
+        #expect(view.withTerminal { $0.isCurrentBufferAlternate })
+        #expect(!view.withTerminal { $0.synchronizedOutputActive })
+        #expect(delegate.scrolled.count == 1)
+        #expect(delegate.titles == ["spin 2"])
     }
 
     /// Real delivery path: posts from a background thread while main is

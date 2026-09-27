@@ -2309,6 +2309,27 @@ extension TerminalView {
         eventQueue.postSynchronizedOutputEnded(scrollPosition: position)
     }
 
+    /// Applies a coalesced latest-value event (IT-1075). Shared by the Mac and
+    /// iOS drains so both platforms run — and the tests cover — one body.
+    ///
+    /// Delivery contract: only the latest title / scroll position since the
+    /// previous drain is delivered, and these callbacks are not ordered
+    /// against callbacks still dispatched individually through `onMain`
+    /// (directory, size, colors). Final values are always delivered.
+    func applyCoalescedPayloadEvent (_ event: TerminalEvent, payload: TerminalEventPayload)
+    {
+        switch event {
+        case .synchronizedOutputEnded:
+            updateScroller()
+            frameDriver.markDirty()
+            terminalDelegate?.scrolled(source: self, position: payload.synchronizedOutputScrollPosition)
+        case .titleChanged:
+            terminalDelegate?.setTerminalTitle(source: self, title: payload.title)
+        case .bufferActivated, .mouseModeChanged, .bell:
+            break
+        }
+    }
+
     public nonisolated func setBackgroundColor(source: Terminal, color: Color) {
         let nativeColor = TTColor.make(color: color)
         onMain { [weak self] in
@@ -3979,6 +4000,11 @@ extension TerminalView {
         /// Each one is a main-queue block that may take the terminal lock, so a
         /// large value relative to `frames` means callback amplification.
         public var mainHops: Int = 0
+        /// Main-queue blocks scheduled by the coalescing event queue (sync-end,
+        /// title, bell, buffer and mouse-mode notifications). At most one is
+        /// outstanding per view, so under a TUI frame flood this stays near the
+        /// drain rate while the posts it absorbed grow (IT-1075).
+        public var coalescedMainHops: Int = 0
         /// Frames prepared and drawn on the render loop rather than on the main
         /// thread. Zero when no render loop is running.
         public var renderLoopFrames: Int = 0
@@ -4033,6 +4059,7 @@ extension TerminalView {
     /// A snapshot of the current diagnostics. Safe to read from any thread.
     public var diagnostics: Diagnostics {
         var result = diagnosticsState.withLock { $0 }
+        result.coalescedMainHops = eventQueue.scheduledHops
         let frameCounters = frameDriver?.currentCounters ?? FrameDriverCounters()
         result.ticks = frameCounters.ticks
         result.frames = frameCounters.frames
@@ -4094,6 +4121,7 @@ extension TerminalView {
     public func resetDiagnostics ()
     {
         diagnosticsState.withLock { $0 = Diagnostics() }
+        eventQueue.resetCounters()
         frameDriver?.resetCounters()
 #if canImport(MetalKit)
         renderOwner.resetMetalCounters()
