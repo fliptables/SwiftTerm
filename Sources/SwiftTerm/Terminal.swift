@@ -721,6 +721,42 @@ open class Terminal {
         parser.reset(self)
     }
 
+    /// True when the parser holds input it has only partly read: an
+    /// unfinished escape, control or string sequence, or the first bytes of a
+    /// UTF-8 character. Read under `terminalLock`, between feeds.
+    public var hasPendingSequence: Bool {
+        parser.currentState != .ground || parser.pendingSequenceOverflowed
+            || !readingBuffer.putbackBuffer.isEmpty
+    }
+
+    /// The bytes the parser holds from an unfinished sequence, verbatim, so a
+    /// second terminal fed them resumes in the same parser state. A C0 control
+    /// executed inside the sequence is left out, because its effect is already
+    /// in this terminal's state. Empty when ``hasPendingSequence`` is false;
+    /// `nil` when the open sequence is larger than the parser keeps (an image
+    /// transfer), in which case the caller waits for the next feed. Read under
+    /// `terminalLock`, between feeds.
+    public var pendingParserBytes: [UInt8]? {
+        if parser.pendingSequenceOverflowed { return nil }
+        if readingBuffer.putbackBuffer.isEmpty { return parser.pendingSequenceBytes }
+        return readingBuffer.putbackBuffer + parser.pendingSequenceBytes
+    }
+
+    /// Whether this terminal answers the queries it parses (device
+    /// attributes, status and cursor reports, mode and colour queries, Kitty
+    /// replies, unsolicited reports such as in-band size changes). A passive
+    /// replica fed the same bytes as the terminal that owns the child sets
+    /// this to `false`, so exactly one emulator answers. User input
+    /// (`sendUserInput`, paste, clicks, focus reports) is not affected.
+    public var respondsToQueries: Bool = true
+
+    /// The one sink for a response this terminal generates from its input.
+    @inline(__always)
+    func sendQueryResponse(_ data: ArraySlice<UInt8>) {
+        guard respondsToQueries else { return }
+        tdel?.send(source: self, data: data)
+    }
+
     /// Owns copied OSC observations independently of parser storage.
     private let oscEventDispatcher = TerminalOscEventDispatcher()
 
@@ -3210,7 +3246,9 @@ open class Terminal {
                 // Absolute rows are reported clamped to the viewport.
                 y = min(max(position.row - buffer.yBase + 1, 1), rows)
             }
-            sendResponse("\u{1b}[<0;\(x);\(y)M")
+            // A click is user input, not a query response: it is sent even
+            // when `respondsToQueries` is false.
+            tdel?.send(source: self, data: Array("\u{1b}[<0;\(x);\(y)M".utf8)[...])
             return true
         case .cursorKeys(let strategy):
             // The cursor's offset uses buffer.x unclamped so a pending wrap
@@ -7162,7 +7200,7 @@ open class Terminal {
      */
     public func sendResponse (text: String)
     {
-        tdel?.send (source: self, data: ([UInt8] (text.utf8))[...])
+        sendQueryResponse(([UInt8] (text.utf8))[...])
     }
     
     /**
@@ -7170,6 +7208,19 @@ open class Terminal {
      * that could be either [UInt8], Strings, or a single UInt8 value.
      */
     public func sendResponse (_ items: Any ...)
+    {
+        sendQueryResponse(responseBytes(items)[...])
+    }
+
+    /// Sends a report the user caused (a mouse event). Unlike
+    /// ``sendResponse(_:)`` it is not a query response, so a passive replica
+    /// (`respondsToQueries == false`) still sends it.
+    func sendUserReport (_ items: Any ...)
+    {
+        tdel?.send (source: self, data: responseBytes(items)[...])
+    }
+
+    private func responseBytes (_ items: [Any]) -> [UInt8]
     {
         var buffer: [UInt8] = []
         
@@ -7184,7 +7235,7 @@ open class Terminal {
                 log ("Do not know how to handle type \(item)")
             }
         }
-        tdel?.send (source: self, data: buffer[...])
+        return buffer
     }
     
 #if DEBUG
@@ -8324,26 +8375,26 @@ open class Terminal {
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
         case .x10:
-            sendResponse(cc.CSI, "M", [UInt8(min(buttonFlags+32, 255)), UInt8(min(32 + x+1, 255)), UInt8(min(32+y+1, 255))])
+            sendUserReport(cc.CSI, "M", [UInt8(min(buttonFlags+32, 255)), UInt8(min(32 + x+1, 255)), UInt8(min(32+y+1, 255))])
         case .sgr:
             let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
             let m = isRelease ? "m" : "M"
-            sendResponse(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
+            sendUserReport(cc.CSI, "<\(bflags);\(x+1);\(y+1)\(m)")
         case .sgrPixel:
             let isRelease = (buttonFlags & 3) == 3 && (buttonFlags & 32) == 0
             let bflags : Int = isRelease ? (buttonFlags & ~3) : buttonFlags
             let m = isRelease ? "m" : "M"
-            sendResponse(cc.CSI, "<\(bflags);\(pixelX);\(pixelY)\(m)")
+            sendUserReport(cc.CSI, "<\(bflags);\(pixelX);\(pixelY)\(m)")
             
         case .urxvt:
-            sendResponse(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
+            sendUserReport(cc.CSI, "\(buttonFlags+32);\(x+1);\(y+1)M");
         case .utf8:
             var buffer: [UInt8] = [UInt8 (ascii: "M")]
             encodeMouseUtf(data: &buffer, ch: buttonFlags+32)
             encodeMouseUtf (data: &buffer, ch: x+33)
             encodeMouseUtf (data: &buffer, ch: y+33)
-            sendResponse(cc.CSI, buffer)
+            sendUserReport(cc.CSI, buffer)
         }
     }
     

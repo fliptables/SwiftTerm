@@ -436,6 +436,20 @@ final class EscapeSequenceParser {
     var _collect: cstring
     var _parameterLimitExceeded: Bool
     let maximumOscBytes: Int
+
+    /// The raw bytes of the sequence the parser has started but not finished,
+    /// as they arrived, minus any C0 control executed inside it (its effect
+    /// is already applied). Feeding these bytes to a fresh parser puts it in
+    /// the same state without repeating a side effect. Empty in ground state.
+    private(set) var pendingSequenceBytes: [UInt8] = []
+    /// True when the open sequence outgrew ``maximumPendingSequenceBytes``;
+    /// its bytes are then not kept and ``pendingSequenceBytes`` is empty.
+    private(set) var pendingSequenceOverflowed = false
+    /// Upper bound for ``pendingSequenceBytes``. A replication snapshot needs
+    /// the open sequence verbatim; one larger than this (an image transfer)
+    /// is reported as overflowed so the caller waits for it to finish.
+    static let maximumPendingSequenceBytes = 256 * 1024
+
     private var didResetDuringParse = false
     private var resetSerial = 0
     private var parseDepth = 0
@@ -761,7 +775,52 @@ final class EscapeSequenceParser {
         _collect = []
         _parameterLimitExceeded = false
         activeDcsHandler = nil
+        pendingSequenceBytes = []
+        pendingSequenceOverflowed = false
         terminal.printStateReset()
+    }
+
+    /// Records the open sequence at the end of one parse batch.
+    ///
+    /// `sequenceStart` is the batch index where a sequence began, or -1 when
+    /// the open sequence continues one from an earlier batch. `skipped` lists
+    /// batch indices of C0 controls executed inside the sequence.
+    @inline(__always)
+    private func recordPendingSequence(
+        _ data: Span<UInt8>, sequenceStart: Int, skipped: [Int], endState: UInt8)
+    {
+        if endState == ParserState.ground.rawValue {
+            if !pendingSequenceBytes.isEmpty { pendingSequenceBytes = [] }
+            pendingSequenceOverflowed = false
+            return
+        }
+        let start: Int
+        if sequenceStart >= 0 {
+            pendingSequenceBytes.removeAll(keepingCapacity: true)
+            pendingSequenceOverflowed = false
+            start = sequenceStart
+        } else {
+            start = 0
+        }
+        if pendingSequenceOverflowed { return }
+        let end = data.count
+        if pendingSequenceBytes.count + (end - start) > EscapeSequenceParser.maximumPendingSequenceBytes {
+            pendingSequenceBytes = []
+            pendingSequenceOverflowed = true
+            return
+        }
+        var runStart = start
+        for skip in skipped where skip >= start {
+            appendRun(data, runStart..<skip)
+            runStart = skip + 1
+        }
+        appendRun(data, runStart..<end)
+    }
+
+    @inline(__always)
+    private func appendRun(_ data: Span<UInt8>, _ range: Range<Int>) {
+        guard !range.isEmpty else { return }
+        data.extracting(range).withUnsafeBufferPointer { pendingSequenceBytes.append(contentsOf: $0) }
     }
 
     var logFileCounter = 1
@@ -887,6 +946,11 @@ final class EscapeSequenceParser {
         var parameterLimitExceeded = self._parameterLimitExceeded
         let tableData = table.table
         var dcsHandler = activeDcsHandler
+        // Where the sequence open at the end of this batch began (-1: it
+        // continues one from an earlier batch), and the C0 controls executed
+        // inside it. See `recordPendingSequence`.
+        var sequenceStart = -1
+        var sequenceSkips: [Int] = []
 
         func ownedSlice(_ range: Range<Int>) -> ArraySlice<UInt8> {
             let result = data.extracting(range).copiedBytes()
@@ -1205,7 +1269,29 @@ final class EscapeSequenceParser {
             case .reserved:
                 break
             }
-            currentState = transition & 15
+            let nextState = transition & 15
+            if nextState != ParserState.ground.rawValue {
+                let groundState = ParserState.ground.rawValue
+                switch action {
+                case .clear where code == 0x1b || (code >= 0x80 && code <= 0x9f):
+                    // ESC or a C1 introducer opens a new sequence and
+                    // abandons any open one.
+                    sequenceStart = i
+                    sequenceSkips.removeAll(keepingCapacity: true)
+                case .oscEnd, .dcsUnhook:
+                    // A string ended by ESC: the ESC opens the next sequence.
+                    sequenceStart = i
+                    sequenceSkips.removeAll(keepingCapacity: true)
+                case .execute where currentState != groundState:
+                    sequenceSkips.append(i)
+                default:
+                    if currentState == groundState {
+                        sequenceStart = i
+                        sequenceSkips.removeAll(keepingCapacity: true)
+                    }
+                }
+            }
+            currentState = nextState
             input = input.extracting(droppingFirst: consumed)
             i += consumed
         }
@@ -1231,7 +1317,9 @@ final class EscapeSequenceParser {
         _pars = pars
         _parsColonMask = parsColonMask
         _parameterLimitExceeded = parameterLimitExceeded
-        
+        recordPendingSequence(data, sequenceStart: sequenceStart, skipped: sequenceSkips,
+                              endState: currentState)
+
         // save active dcs handler reference
         activeDcsHandler = dcsHandler
         
