@@ -105,8 +105,15 @@ extension Terminal {
         out.append("terminal.altActive = \(isCurrentBufferAlternate)")
         out.append("terminal.activeHyperlink = \(describeActiveHyperlink())")
         out.append("terminal.pendingParserBytes = \(pendingParserBytes.map { $0.map(String.init).joined(separator: ",") } ?? "overflow")")
-        Terminal.digest(buffer: normalBuffer, name: "normal", into: &out)
-        Terminal.digest(buffer: altBuffer, name: "alt", into: &out)
+        // Attributes are numbered in order of first appearance and listed once at the end, so a
+        // cell costs a table lookup instead of a reflective description; two states with equal
+        // cells number their attributes identically.
+        var attributes = DigestAttributes()
+        Terminal.digest(buffer: normalBuffer, name: "normal", attributes: &attributes, into: &out)
+        Terminal.digest(buffer: altBuffer, name: "alt", attributes: &attributes, into: &out)
+        for (index, attribute) in attributes.list.enumerated() {
+            out.append("attribute[\(index)] = \(attribute)")
+        }
         return out
     }
 
@@ -119,7 +126,8 @@ extension Terminal {
         }
     }
 
-    private static func digest(buffer: Buffer, name: String, into out: inout [String]) {
+    private static func digest(buffer: Buffer, name: String, attributes: inout DigestAttributes,
+                               into out: inout [String]) {
         for child in Mirror(reflecting: buffer).children {
             guard let label = child.label, digestExcludedBufferProperties[label] == nil else { continue }
             out.append("\(name).\(label) = \(DigestDescriber.describe(child.value))")
@@ -136,22 +144,60 @@ extension Terminal {
                 parts.append("\(label)=\(DigestDescriber.describe(child.value))")
             }
             parts.append("cols=\(line.count)")
-            parts.append("tail=\(line.replicationTailAttribute)")
+            parts.append("tail=a\(attributes.id(line.replicationTailAttribute))")
             out.append("\(name).line[\(row)] \(parts.joined(separator: " "))")
-            var cells: [String] = []
-            cells.reserveCapacity(line.count)
+            // One cell: its scalars, width, width state, attribute number, hyperlink target,
+            // semantic content code and protection, as bytes.
+            var cells: [UInt8] = Array("\(name).line[\(row)].cells ".utf8)
+            cells.reserveCapacity(cells.count + line.count * 12)
             for column in 0..<line.count {
                 let data = line[column]
-                let payload: String
-                if data.payload.code == 0 {
-                    payload = ""
+                if column > 0 { cells.append(0x7c) }
+                if let graphemes = data.packedGraphemeScalars {
+                    for (i, scalar) in graphemes.enumerated() {
+                        if i > 0 { cells.append(0x2b) }
+                        DigestAttributes.appendDecimal(UInt64(scalar), to: &cells)
+                    }
                 } else {
-                    payload = data.payload.target as? String ?? "<non-string>"
+                    DigestAttributes.appendDecimal(UInt64(UInt32(bitPattern: data.code)), to: &cells)
                 }
-                cells.append("\(data.getText().unicodeScalars.map { String($0.value, radix: 16) }.joined(separator: "+"))/\(data.width)/\(data.packedWidthStateCode)/\(data.attribute)/\(payload)/\(data.semanticContent)/\(data.isProtected)")
+                cells.append(0x2f)
+                DigestAttributes.appendDecimal(UInt64(UInt8(bitPattern: data.width)), to: &cells)
+                cells.append(0x2f)
+                DigestAttributes.appendDecimal(UInt64(data.packedWidthStateCode), to: &cells)
+                cells.append(0x2f)
+                DigestAttributes.appendDecimal(UInt64(attributes.id(data.attribute)), to: &cells)
+                cells.append(0x2f)
+                if data.payload.code != 0 {
+                    cells.append(contentsOf: Array((data.payload.target as? String ?? "<non-string>").utf8))
+                }
+                cells.append(0x2f)
+                DigestAttributes.appendDecimal(UInt64(CellArena.semanticContentCode(for: data.semanticContent)), to: &cells)
+                cells.append(data.isProtected ? 0x50 : 0x2d)
             }
-            out.append("\(name).line[\(row)].cells \(cells.joined(separator: "|"))")
+            out.append(String(decoding: cells, as: UTF8.self))
         }
+    }
+}
+
+/// Numbers attributes in order of first appearance for the digest.
+struct DigestAttributes {
+    var list: [Attribute] = []
+    var index: [Attribute: Int] = [:]
+
+    mutating func id(_ attribute: Attribute) -> Int {
+        if let existing = index[attribute] { return existing }
+        list.append(attribute)
+        index[attribute] = list.count - 1
+        return list.count - 1
+    }
+
+    static func appendDecimal(_ value: UInt64, to bytes: inout [UInt8]) {
+        if value < 10 { bytes.append(0x30 + UInt8(value)); return }
+        var digits: [UInt8] = []
+        var v = value
+        while v > 0 { digits.append(0x30 + UInt8(v % 10)); v /= 10 }
+        bytes.append(contentsOf: digits.reversed())
     }
 }
 
