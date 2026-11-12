@@ -594,6 +594,14 @@ extension LineImage {
     static let hasPayload: UInt8 = 1 << 3
     static let hasSemantic: UInt8 = 1 << 4
     static let protected: UInt8 = 1 << 5
+    /// A run of plain printable ASCII cells in the current attribute: a count, then the bytes.
+    static let asciiRun: UInt8 = 1 << 6
+
+    private static func isPlainASCII(_ cell: CellImage, attribute: Int, previous: Int) -> Bool {
+        attribute == previous && cell.width == 1 && cell.widthState == 0 && cell.graphemes == nil
+            && cell.payload == nil && cell.semantic == 0 && !cell.isProtected
+            && cell.code >= 0x20 && cell.code < 0x7f
+    }
 
     func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable, payloads: inout PayloadTable) {
         w.uint(cols); w.bool(isWrapped)
@@ -606,8 +614,25 @@ extension LineImage {
         w.uint(tail)
         w.uint(cells.count)
         var previous = tail
-        for cell in cells {
+        var index = 0
+        while index < cells.count {
+            let cell = cells[index]
             let attribute = attributes.id(cell.attribute)
+            if LineImage.isPlainASCII(cell, attribute: attribute, previous: previous) {
+                var end = index + 1
+                while end < cells.count,
+                      LineImage.isPlainASCII(cells[end], attribute: attributes.id(cells[end].attribute), previous: previous) {
+                    end += 1
+                }
+                if end - index >= 3 {
+                    w.u8(LineImage.asciiRun)
+                    w.uint(end - index)
+                    for plain in cells[index..<end] { w.u8(UInt8(plain.code)) }
+                    index = end
+                    continue
+                }
+            }
+            index += 1
             var flags: UInt8 = 0
             if attribute != previous { flags |= LineImage.newAttribute }
             if cell.width != 1 || cell.widthState != 0 { flags |= LineImage.unusualWidth }
@@ -645,8 +670,19 @@ extension LineImage {
         let cellCount = try r.count(max: cols, "cells")
         var decoded: [CellImage] = []
         decoded.reserveCapacity(cellCount)
-        for _ in 0..<cellCount {
+        while decoded.count < cellCount {
             let flags = try r.u8()
+            if flags == LineImage.asciiRun {
+                let run = try r.count(max: cellCount - decoded.count, "ascii run")
+                for _ in 0..<run {
+                    let code = try r.u8()
+                    guard code >= 0x20, code < 0x7f else { throw TerminalStateSnapshotError.invalid("ascii run") }
+                    decoded.append(CellImage(attribute: current, code: Int32(code), graphemes: nil, width: 1,
+                                             widthState: 0, payload: nil, semantic: 0, isProtected: false))
+                }
+                continue
+            }
+            guard flags & LineImage.asciiRun == 0 else { throw TerminalStateSnapshotError.invalid("cell flags") }
             if flags & LineImage.newAttribute != 0 { current = try SnapshotCodec.attribute(&r, attributes) }
             let code = try r.int()
             guard code >= Int(Int32.min), code <= Int(Int32.max) else { throw TerminalStateSnapshotError.invalid("code") }
