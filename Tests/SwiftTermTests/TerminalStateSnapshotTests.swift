@@ -19,6 +19,7 @@ final class TerminalStateSnapshotTests {
     private static func make(_ capture: Capture, responds: Bool) -> Terminal {
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.respondsToQueries = responds
+        terminal.synchronizedOutputTimeout = nil
         return terminal
     }
 

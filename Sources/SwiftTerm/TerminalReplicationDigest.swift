@@ -29,6 +29,8 @@ extension Terminal {
         "synchronizedOutputWatchdogDirty": "watchdog bookkeeping",
         "synchronizedOutputTimeoutItem": "watchdog timer",
         "synchronizedOutputWatchdogCounters": "watchdog diagnostics",
+        "synchronizedOutputTimeoutDisabled": "the host's choice of valve, not emulator state",
+        "synchronizedOutputTimeoutSeconds": "the host's choice of valve, not emulator state",
         "tdel": "delegate",
         "curStyleID": "storage identity of curAttr",
         "currentEraseBlankCell": "storage identity of the erase attribute",

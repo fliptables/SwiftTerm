@@ -180,6 +180,47 @@ final class ReplicationPrimitivesTests {
         }
     }
 
+    // MARK: the DEC 2026 valve under the host's control
+
+    @Test func aNilTimeoutNeverArmsTheValve() {
+        let (terminal, _) = makeTerminal()
+        terminal.synchronizedOutputTimeout = nil
+        terminal.feed(text: "\u{1b}[?2026h")
+        #expect(terminal.synchronizedOutputActive)
+        #expect(terminal.synchronizedOutputWatchdogCounters.armed == 0)
+        #expect(terminal.synchronizedOutputTimeout == nil)
+    }
+
+    @Test func theDefaultTimeoutIsUnchanged() {
+        let (terminal, _) = makeTerminal()
+        #expect(terminal.synchronizedOutputTimeout == 1.0)
+        terminal.feed(text: "\u{1b}[?2026h")
+        #expect(terminal.synchronizedOutputWatchdogCounters.armed == 1)
+        terminal.feed(text: "\u{1b}[?2026l")
+    }
+
+    @Test func expiringTheValveEndsTheModeOnceAndOnlyOnce() {
+        let (terminal, _) = makeTerminal()
+        terminal.synchronizedOutputTimeout = nil
+        terminal.feed(text: "\u{1b}[?2026h")
+        #expect(terminal.expireSynchronizedOutput())
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(!terminal.expireSynchronizedOutput())
+        #expect(terminal.synchronizedOutputWatchdogCounters.fired == 1)
+    }
+
+    @Test func settingNilCancelsAnArmedValve() {
+        let (terminal, _) = makeTerminal()
+        terminal.feed(text: "\u{1b}[?2026h")
+        #expect(terminal.synchronizedOutputWatchdogCounters.armed == 1)
+        terminal.synchronizedOutputTimeout = nil
+        #expect(terminal.synchronizedOutputActive)
+        #expect(terminal.synchronizedOutputTimeout == nil)
+        // The armed item was cancelled, so ending the mode records no cancellation of a live timer.
+        terminal.feed(text: "\u{1b}[?2026l")
+        #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 0)
+    }
+
     // MARK: onOutput
 
     @Test func onOutputSeesEachBatchUnderTheLockAfterTheFeed() {

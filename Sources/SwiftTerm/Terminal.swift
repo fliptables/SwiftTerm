@@ -559,6 +559,37 @@ open class Terminal {
     /// middle of an unrelated assertion. Both were timing-fragile against a
     /// fixed 1 s.
     var synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
+
+    /// Whether the DEC 2026 safety valve is armed, and after how long. The default (1 s) is the
+    /// valve that unfreezes a display an application left frozen. `nil` never arms it: a
+    /// replica sets that, because the terminal that owns the child decides when the valve
+    /// opens and sends it as an ordered event (``expireSynchronizedOutput()``); a test sets it
+    /// so no comparison depends on wall-clock time.
+    public var synchronizedOutputTimeout: TimeInterval? {
+        get { synchronizedOutputTimeoutDisabled ? nil : synchronizedOutputTimeoutSeconds }
+        set {
+            synchronizedOutputTimeoutDisabled = newValue == nil
+            if let newValue { synchronizedOutputTimeoutSeconds = newValue }
+            if synchronizedOutputTimeoutDisabled, let synchronizedOutputTimeoutItem {
+                synchronizedOutputTimeoutItem.cancel()
+                self.synchronizedOutputTimeoutItem = nil
+            }
+        }
+    }
+    private var synchronizedOutputTimeoutDisabled = false
+
+    /// Opens the DEC 2026 valve now, as the safety timer would: ends synchronized output if it
+    /// is active. A replica applies the owner's "the valve opened" event with this, at the same
+    /// point in the stream. Returns whether the mode was active. Call under `terminalLock`.
+    @discardableResult
+    public func expireSynchronizedOutput() -> Bool {
+        guard synchronizedOutputActive else { return false }
+        synchronizedOutputTimeoutItem?.cancel()
+        synchronizedOutputTimeoutItem = nil
+        synchronizedOutputWatchdogCounters.fired += 1
+        endSynchronizedOutput()
+        return true
+    }
     public private(set) var synchronizedOutputActive: Bool = false
     private(set) var synchronizedOutputGeneration: UInt64 = 0
     private var synchronizedOutputWatchdogDirty = false
@@ -8216,6 +8247,7 @@ open class Terminal {
             return
         }
 
+        guard !synchronizedOutputTimeoutDisabled else { return }
         if synchronizedOutputTimeoutItem == nil {
             synchronizedOutputWatchdogCounters.armed += 1
         } else {
