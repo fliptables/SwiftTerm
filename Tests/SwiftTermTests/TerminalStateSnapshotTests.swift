@@ -50,6 +50,8 @@ final class TerminalStateSnapshotTests {
     /// Returns the first failing cut, or nil.
     static func replicate(_ steps: [Step]) -> String? {
         let units = explode(steps)
+        var resyncs = 0
+        defer { if resyncs > 0 { print("streamed resyncs: \(resyncs)") } }
         for cut in 0...units.count {
             let ownerCapture = Capture()
             let owner = make(ownerCapture, responds: true)
@@ -75,6 +77,46 @@ final class TerminalStateSnapshotTests {
                 return "cut \(cut) after the tail: \(diff)"
             }
             if !replicaCapture.sent.isEmpty { return "cut \(cut): the replica answered a query" }
+
+            // Streamed: the screen part, half the tail (stopping before a resize), the history
+            // chunks nearest the screen first, then the rest.
+            let freshCapture = Capture()
+            let fresh = make(freshCapture, responds: true)
+            for step in units[..<cut] { apply(step, to: fresh) }
+            let export = fresh.exportForStreaming()
+            guard let screen = try? TerminalStateSnapshot(encoded: export.screen.encoded()) else {
+                return "cut \(cut): the screen part does not decode"
+            }
+            let streamedCapture = Capture()
+            let streamed = make(streamedCapture, responds: false)
+            streamed.importState(screen)
+            let tail = Array(units[cut...])
+            var split = tail.count / 2
+            if let resize = tail.firstIndex(where: { if case .resize = $0 { return true }; return false }) {
+                split = min(split, resize)
+            }
+            for step in tail[..<split] { apply(step, to: streamed) }
+            var refused = false
+            for chunk in export.historyChunks(linesPerChunk: 7) {
+                guard let decoded = try? TerminalHistoryChunk(encoded: chunk.encoded()) else {
+                    return "cut \(cut): a history chunk does not decode"
+                }
+                if !streamed.importHistoryChunk(decoded) { refused = true; break }
+            }
+            if refused {
+                // The protocol's resync: the grid changed under the chunks, so the host
+                // snapshots again where the replica now is (this point of the tail).
+                guard tail[..<split].contains(where: { if case .resize = $0 { return true }; return false })
+                        || fresh.normalBuffer.cols != fresh.cols || fresh.normalBuffer.rows != fresh.rows else {
+                    return "cut \(cut): a chunk was refused although no grid changed"
+                }
+                resyncs += 1
+                continue
+            }
+            for step in tail[split...] { apply(step, to: streamed) }
+            if let diff = firstDifference(owner.replicationDigest(), streamed.replicationDigest()) {
+                return "cut \(cut) streamed, after the tail: \(diff)"
+            }
         }
         return nil
     }

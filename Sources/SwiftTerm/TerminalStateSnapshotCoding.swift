@@ -520,6 +520,7 @@ extension BufferImage {
         w.uint(cols); w.uint(rows)
         w.optional(scrollback) { $0.uint($1) }
         w.uint(lineCapacity)
+        w.uint(pendingHistoryLines)
         w.uint(lines.count)
         for line in lines { line.encode(&w, attributes: &attributes, payloads: &payloads) }
         for value in [x, y, yBase, yDisp, xDisp, xBase, linesTop, scrollTop, scrollBottom, marginLeft, marginRight] {
@@ -551,6 +552,7 @@ extension BufferImage {
         scrollback = try r.optional { try $0.uint() }
         lineCapacity = try r.count(max: Int(Int32.max), "line capacity")
         guard lineCapacity > 0 else { throw TerminalStateSnapshotError.invalid("line capacity") }
+        pendingHistoryLines = try r.count(max: lineCapacity, "pending history")
         let lineCount = try r.count(max: min(lineCapacity, r.bytes.count), "lines")
         var decoded: [LineImage] = []
         decoded.reserveCapacity(lineCount)

@@ -172,6 +172,8 @@ struct BufferImage: Equatable, Sendable {
     /// resized smaller keeps its larger capacity (and lines), and how many
     /// lines it holds before trimming decides later output.
     var lineCapacity: Int
+    /// History lines left out of a screen part, still to arrive as chunks.
+    var pendingHistoryLines: Int = 0
     var lines: [LineImage]
     var x: Int
     var y: Int
@@ -234,6 +236,10 @@ extension Terminal.TerminalConformance: Equatable {}
 extension Terminal {
     /// Exports the emulator state. Call under `terminalLock`, between feeds.
     public func exportState() -> TerminalStateSnapshot {
+        exportState(skippingHistory: false)
+    }
+
+    func exportState(skippingHistory: Bool) -> TerminalStateSnapshot {
         var dropped = 0
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
@@ -291,8 +297,8 @@ extension Terminal {
             visibilityReportsEnabled: visibilityReportsEnabled,
             inBandSizeReportsEnabled: inBandSizeReportsEnabled,
             kittyPasteEventsEnabled: kittyPasteEventsEnabled)
-        let normalImage = Terminal.bufferImage(normalBuffer, dropped: &dropped)
-        let altImage = Terminal.bufferImage(altBuffer, dropped: &dropped)
+        let normalImage = Terminal.bufferImage(normalBuffer, dropped: &dropped, skippingHistory: skippingHistory)
+        let altImage = Terminal.bufferImage(altBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
             pendingParserBytes: pendingParserBytes ?? [],
@@ -318,21 +324,23 @@ extension Terminal {
         }
     }
 
-    static func bufferImage(_ buffer: Buffer, dropped: inout Int) -> BufferImage {
+    static func bufferImage(_ buffer: Buffer, dropped: inout Int, skippingHistory: Bool = false) -> BufferImage {
+        let history = skippingHistory ? min(buffer.yBase, buffer.lines.count) : 0
         var lines: [LineImage] = []
-        lines.reserveCapacity(buffer.lines.count)
-        for index in 0..<buffer.lines.count {
+        lines.reserveCapacity(buffer.lines.count - history)
+        for index in history..<buffer.lines.count {
             lines.append(lineImage(buffer.lines[index], dropped: &dropped))
         }
         var startRow: Int? = nil
-        if let start = buffer.semanticPromptStartLine {
-            startRow = buffer.absoluteRow(of: start)
+        if let start = buffer.semanticPromptStartLine, let row = buffer.absoluteRow(of: start) {
+            startRow = row >= history ? row - history : nil
         }
         return BufferImage(
             cols: buffer.cols, rows: buffer.rows, scrollback: buffer.scrollback,
             lineCapacity: buffer.lines.maxLength,
+            pendingHistoryLines: history,
             lines: lines,
-            x: buffer.x, y: buffer.y, yBase: buffer.yBase, yDisp: buffer.yDisp,
+            x: buffer.x, y: buffer.y, yBase: buffer.yBase - history, yDisp: max(0, buffer.yDisp - history),
             xDisp: buffer.xDisp, xBase: buffer.xBase, linesTop: buffer.linesTop,
             scrollTop: buffer.scrollTop, scrollBottom: buffer.scrollBottom,
             marginLeft: buffer.marginLeft, marginRight: buffer.marginRight,
@@ -491,7 +499,7 @@ extension Terminal {
             buffer.lines.maxLength = image.lineCapacity
         }
         for lineImage in image.lines {
-            buffer.lines.push(makeLine(lineImage, arena: buffer.cellArena, payloads: &payloads))
+            buffer.lines.push(makeImportedLine(lineImage, arena: buffer.cellArena, payloads: &payloads))
         }
         buffer.x = image.x
         buffer.y = image.y
@@ -529,13 +537,17 @@ extension Terminal {
         return buffer
     }
 
-    private func makeLine(_ image: LineImage, arena: CellArena,
+    func makeImportedLine(_ image: LineImage, arena: CellArena,
                           payloads: inout [String: TinyAtom]) -> BufferLine {
         guard let blank = arena.pack(attribute: image.tailAttribute, scalar: 0, widthState: .narrow) else {
             preconditionFailure("The snapshot holds an attribute this arena cannot store")
         }
         let line = BufferLine(cols: image.cols, packedFill: blank, blankTailCell: blank,
                               isWrapped: image.isWrapped, bidiState: image.bidiState, arena: arena)
+        var packed: [PackedCell] = []
+        packed.reserveCapacity(image.cells.count)
+        var lastAttribute: Attribute? = nil
+        var lastStyle: UInt16 = 0
         for (column, cell) in image.cells.enumerated() where column < image.cols {
             var payloadCode: UInt16 = 0
             if let text = cell.payload {
@@ -546,12 +558,32 @@ extension Terminal {
                     payloadCode = atom.code
                 }
             }
-            line[column] = CharData(
+            // The common cell (one scalar, not blank) packs from the run's style identifier;
+            // anything else takes the general path, which owns the blank and grapheme encodings.
+            if cell.graphemes == nil, cell.code > 0,
+               let widthState = PackedCell.WidthState(rawValue: cell.widthState) {
+                if cell.attribute != lastAttribute {
+                    lastStyle = arena.intern(attribute: cell.attribute) ?? 0
+                    lastAttribute = cell.attribute
+                }
+                if let fast = arena.pack(styleID: lastStyle, scalar: UInt32(bitPattern: cell.code),
+                                         widthState: widthState, payloadCode: payloadCode,
+                                         semanticContentCode: cell.semantic, isProtected: cell.isProtected) {
+                    packed.append(fast)
+                    continue
+                }
+            }
+            let data = CharData(
                 attribute: cell.attribute, code: cell.code, graphemeScalarValues: cell.graphemes,
                 size: cell.width, widthStateCode: cell.widthState, payloadCode: payloadCode,
                 semanticContent: CellArena.semanticContent(for: cell.semantic),
                 isProtected: cell.isProtected)
+            guard let general = arena.pack(data) else {
+                preconditionFailure("The snapshot holds a cell this arena cannot store")
+            }
+            packed.append(general)
         }
+        line.replicationWritePacked(packed)
         line.renderMode = LineImage.renderMode(image.renderMode)
         line.replicationSetSemanticMarks(image.semanticMarks)
         line.semanticHardContinuationGroup = image.hardContinuationGroup

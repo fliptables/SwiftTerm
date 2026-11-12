@@ -182,6 +182,25 @@ public final class BufferLine: CustomDebugStringConvertible {
     var replicationUsedLength: Int { usedLength }
     /// The attribute of the blank that fills the line after its written prefix.
     var replicationTailAttribute: Attribute { storage.arena.attribute(for: tailBlankCell) }
+    /// Writes an imported line's prefix of packed cells (owned by this line's arena) in one
+    /// pass, with one change bump.
+    func replicationWritePacked(_ cells: [PackedCell]) {
+        let count = min(cells.count, storage.count)
+        for index in 0..<count { storage.setRawCell(cells[index], at: index) }
+        if count > 0 { noteWritten(upTo: count) }
+        bump()
+    }
+
+    /// Copies a line into a snapshot arena under the terminal lock, keeping the replication
+    /// metadata `copyForSnapshot` drops (semantic marks and the hard-continuation group).
+    func replicationCopy(arena snapshotArena: CellArena) -> BufferLine {
+        let copy = BufferLine(cols: count, arena: snapshotArena)
+        copy.copyForSnapshot(from: self, arena: snapshotArena)
+        copy.semanticMarks = semanticMarks
+        copy.semanticHardContinuationGroup = semanticHardContinuationGroup
+        return copy
+    }
+
     /// Restores the OSC 133 marks of an imported line.
     func replicationSetSemanticMarks(_ marks: [SemanticMark]) { semanticMarks = marks }
 
