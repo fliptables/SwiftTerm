@@ -147,6 +147,23 @@ final class TerminalStateSnapshotTests {
         #expect(failure == nil, "\(name): \(failure ?? "")")
     }
 
+    /// Found by T3 on a recorded `less` session: a terminal made at 24 rows has an
+    /// alternate buffer that holds 25 lines (it was built at the default 25), and its
+    /// capacity decides when output starts trimming.
+    @Test func aBufferHoldingMoreLinesThanItsRowsRoundTrips() throws {
+        let capture = Capture()
+        let owner = Terminal(delegate: capture, options: TerminalOptions(cols: 80, rows: 24, scrollback: 500))
+        owner.feed(text: "\u{1b}[?1049h\u{1b}[24;1Hx")
+        let replica = Terminal(delegate: Capture(), options: TerminalOptions(cols: 80, rows: 24, scrollback: 500))
+        replica.respondsToQueries = false
+        replica.importState(try TerminalStateSnapshot(encoded: owner.exportState().encoded()))
+        #expect(owner.replicationDigest() == replica.replicationDigest())
+        let tail = (0..<40).map { "\u{1b}[24;1H\r\nline \($0)" }.joined()
+        owner.feed(text: tail)
+        replica.feed(text: tail)
+        #expect(owner.replicationDigest() == replica.replicationDigest())
+    }
+
     @Test func everyExclusionNamesARealProperty() {
         let terminal = Terminal(delegate: Capture())
         let terminalLabels = Set(Mirror(reflecting: terminal).children.compactMap(\.label))

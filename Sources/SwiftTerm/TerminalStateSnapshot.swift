@@ -168,6 +168,10 @@ struct BufferImage: Equatable, Sendable {
     var cols: Int
     var rows: Int
     var scrollback: Int?
+    /// The line list's capacity. Usually `rows + scrollback`, but a buffer
+    /// resized smaller keeps its larger capacity (and lines), and how many
+    /// lines it holds before trimming decides later output.
+    var lineCapacity: Int
     var lines: [LineImage]
     var x: Int
     var y: Int
@@ -326,6 +330,7 @@ extension Terminal {
         }
         return BufferImage(
             cols: buffer.cols, rows: buffer.rows, scrollback: buffer.scrollback,
+            lineCapacity: buffer.lines.maxLength,
             lines: lines,
             x: buffer.x, y: buffer.y, yBase: buffer.yBase, yDisp: buffer.yDisp,
             xDisp: buffer.xDisp, xBase: buffer.xBase, linesTop: buffer.linesTop,
@@ -482,6 +487,9 @@ extension Terminal {
                             scrollback: image.scrollback, bidiState: image.defaultBidiState,
                             arena: cellArena)
         buffer.terminal = self
+        if buffer.lines.maxLength != image.lineCapacity {
+            buffer.lines.maxLength = image.lineCapacity
+        }
         for lineImage in image.lines {
             buffer.lines.push(makeLine(lineImage, arena: buffer.cellArena, payloads: &payloads))
         }

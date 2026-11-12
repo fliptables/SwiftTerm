@@ -127,6 +127,7 @@ extension Terminal {
         let startRow = buffer.semanticPromptStartLine.flatMap { buffer.absoluteRow(of: $0) }
         out.append("\(name).semanticPromptStartRow = \(startRow.map(String.init) ?? "nil")")
         out.append("\(name).lines.count = \(buffer.lines.count)")
+        out.append("\(name).lines.capacity = \(buffer.lines.maxLength)")
         for row in 0..<buffer.lines.count {
             let line = buffer.lines[row]
             var parts: [String] = []

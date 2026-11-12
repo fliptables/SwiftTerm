@@ -519,6 +519,7 @@ extension BufferImage {
     func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable, payloads: inout PayloadTable) {
         w.uint(cols); w.uint(rows)
         w.optional(scrollback) { $0.uint($1) }
+        w.uint(lineCapacity)
         w.uint(lines.count)
         for line in lines { line.encode(&w, attributes: &attributes, payloads: &payloads) }
         for value in [x, y, yBase, yDisp, xDisp, xBase, linesTop, scrollTop, scrollBottom, marginLeft, marginRight] {
@@ -548,13 +549,13 @@ extension BufferImage {
     init(_ r: inout SnapshotReader, attributes: [Attribute], payloads: [String]) throws {
         cols = try r.count(max: 65535, "buffer cols"); rows = try r.count(max: 65535, "buffer rows")
         scrollback = try r.optional { try $0.uint() }
-        let lineCount = try r.count(max: r.bytes.count, "lines")
+        lineCapacity = try r.count(max: Int(Int32.max), "line capacity")
+        guard lineCapacity > 0 else { throw TerminalStateSnapshotError.invalid("line capacity") }
+        let lineCount = try r.count(max: min(lineCapacity, r.bytes.count), "lines")
         var decoded: [LineImage] = []
         decoded.reserveCapacity(lineCount)
         for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
         lines = decoded
-        let maximum = (scrollback ?? 0) + rows
-        guard lines.count <= maximum else { throw TerminalStateSnapshotError.invalid("more lines than the buffer holds") }
         x = try r.int(); y = try r.int(); yBase = try r.int(); yDisp = try r.int()
         xDisp = try r.int(); xBase = try r.int(); linesTop = try r.int()
         scrollTop = try r.int(); scrollBottom = try r.int(); marginLeft = try r.int(); marginRight = try r.int()
