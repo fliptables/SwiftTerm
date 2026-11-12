@@ -1,0 +1,681 @@
+//
+//  TerminalStateSnapshotCoding.swift
+//
+//  The binary form of a TerminalStateSnapshot: "STSS", a little-endian
+//  UInt32 format version, then the fields in declaration order. Integers are
+//  LEB128 varints (signed ones zigzag); attributes and hyperlink targets are
+//  written once into tables and cells refer to them by index. Lines carry
+//  only their written prefix.
+//
+
+import Foundation
+
+/// Why ``TerminalStateSnapshot/init(encoded:)`` refused its input.
+public enum TerminalStateSnapshotError: Error, Equatable {
+    case badMagic
+    case unsupportedVersion(UInt32)
+    case truncated
+    case invalid(String)
+}
+
+struct SnapshotWriter {
+    var bytes: [UInt8] = []
+
+    mutating func u8(_ value: UInt8) { bytes.append(value) }
+    mutating func bool(_ value: Bool) { bytes.append(value ? 1 : 0) }
+    mutating func uvar(_ value: UInt64) {
+        var v = value
+        while v >= 0x80 {
+            bytes.append(UInt8(v & 0x7f) | 0x80)
+            v >>= 7
+        }
+        bytes.append(UInt8(v))
+    }
+    mutating func uint(_ value: Int) { uvar(UInt64(bitPattern: Int64(value))) }
+    mutating func int(_ value: Int) {
+        let v = Int64(value)
+        uvar(UInt64(bitPattern: (v << 1) ^ (v >> 63)))
+    }
+    mutating func string(_ value: String) { raw(Array(value.utf8)) }
+    mutating func raw(_ value: [UInt8]) {
+        uint(value.count)
+        bytes.append(contentsOf: value)
+    }
+    mutating func optional<T>(_ value: T?, _ write: (inout SnapshotWriter, T) -> Void) {
+        if let value { bool(true); write(&self, value) } else { bool(false) }
+    }
+}
+
+struct SnapshotReader {
+    let bytes: [UInt8]
+    var position = 0
+
+    mutating func u8() throws -> UInt8 {
+        guard position < bytes.count else { throw TerminalStateSnapshotError.truncated }
+        defer { position += 1 }
+        return bytes[position]
+    }
+    mutating func bool() throws -> Bool {
+        switch try u8() {
+        case 0: return false
+        case 1: return true
+        default: throw TerminalStateSnapshotError.invalid("boolean")
+        }
+    }
+    mutating func uvar() throws -> UInt64 {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        while true {
+            let byte = try u8()
+            guard shift < 64 else { throw TerminalStateSnapshotError.invalid("varint") }
+            result |= UInt64(byte & 0x7f) << shift
+            if byte & 0x80 == 0 { return result }
+            shift += 7
+        }
+    }
+    mutating func uint() throws -> Int {
+        let value = Int64(bitPattern: try uvar())
+        guard value >= 0, value <= Int64(Int.max) else { throw TerminalStateSnapshotError.invalid("count") }
+        return Int(value)
+    }
+    mutating func int() throws -> Int {
+        let raw = try uvar()
+        return Int(Int64(bitPattern: (raw >> 1) ^ (0 &- (raw & 1))))
+    }
+    mutating func raw() throws -> [UInt8] {
+        let count = try uint()
+        guard count <= bytes.count - position else { throw TerminalStateSnapshotError.truncated }
+        defer { position += count }
+        return Array(bytes[position..<(position + count)])
+    }
+    mutating func string() throws -> String {
+        guard let text = String(bytes: try raw(), encoding: .utf8) else {
+            throw TerminalStateSnapshotError.invalid("string")
+        }
+        return text
+    }
+    mutating func optional<T>(_ read: (inout SnapshotReader) throws -> T) throws -> T? {
+        try bool() ? try read(&self) : nil
+    }
+    mutating func count(max: Int, _ what: String) throws -> Int {
+        let value = try uint()
+        guard value <= max else { throw TerminalStateSnapshotError.invalid(what) }
+        return value
+    }
+}
+
+// MARK: - Snapshot
+
+extension TerminalStateSnapshot {
+    /// The binary form, for a replica of the same build.
+    public func encoded() -> [UInt8] {
+        var w = SnapshotWriter()
+        w.bytes.append(contentsOf: TerminalStateSnapshot.magic)
+        withUnsafeBytes(of: TerminalStateSnapshot.formatVersion.littleEndian) { w.bytes.append(contentsOf: $0) }
+
+        var attributes = AttributeTable()
+        var payloads = PayloadTable()
+        // Cells first into a body, so the tables they fill precede them.
+        var body = SnapshotWriter()
+        modes.encode(&body, attributes: &attributes)
+        normal.encode(&body, attributes: &attributes, payloads: &payloads)
+        alt.encode(&body, attributes: &attributes, payloads: &payloads)
+        body.raw(pendingParserBytes)
+        body.uint(droppedPayloadCount)
+
+        w.uint(attributes.list.count)
+        for attribute in attributes.list { SnapshotCodec.write(attribute, &w) }
+        w.uint(payloads.list.count)
+        for payload in payloads.list { w.string(payload) }
+        w.bytes.append(contentsOf: body.bytes)
+        return w.bytes
+    }
+
+    /// Decodes ``encoded()``; refuses another magic number or format version.
+    public init(encoded bytes: [UInt8]) throws {
+        guard bytes.count >= 8 else { throw TerminalStateSnapshotError.truncated }
+        guard Array(bytes[0..<4]) == TerminalStateSnapshot.magic else { throw TerminalStateSnapshotError.badMagic }
+        let version = UInt32(bytes[4]) | UInt32(bytes[5]) << 8 | UInt32(bytes[6]) << 16 | UInt32(bytes[7]) << 24
+        guard version == TerminalStateSnapshot.formatVersion else {
+            throw TerminalStateSnapshotError.unsupportedVersion(version)
+        }
+        var r = SnapshotReader(bytes: bytes, position: 8)
+        let attributeCount = try r.count(max: bytes.count, "attribute table")
+        var attributes: [Attribute] = []
+        attributes.reserveCapacity(attributeCount)
+        for _ in 0..<attributeCount { attributes.append(try SnapshotCodec.readAttribute(&r)) }
+        let payloadCount = try r.count(max: bytes.count, "payload table")
+        var payloads: [String] = []
+        for _ in 0..<payloadCount { payloads.append(try r.string()) }
+
+        let modes = try TerminalModesImage(&r, attributes: attributes)
+        let normal = try BufferImage(&r, attributes: attributes, payloads: payloads)
+        let alt = try BufferImage(&r, attributes: attributes, payloads: payloads)
+        let pending = try r.raw()
+        let dropped = try r.uint()
+        guard r.position == bytes.count else { throw TerminalStateSnapshotError.invalid("trailing bytes") }
+        self.init(modes: modes, normal: normal, alt: alt, pendingParserBytes: pending,
+                  droppedPayloadCount: dropped)
+    }
+}
+
+struct AttributeTable {
+    var list: [Attribute] = []
+    var index: [Attribute: Int] = [:]
+    mutating func id(_ attribute: Attribute) -> Int {
+        if let existing = index[attribute] { return existing }
+        list.append(attribute)
+        index[attribute] = list.count - 1
+        return list.count - 1
+    }
+}
+
+struct PayloadTable {
+    var list: [String] = []
+    var index: [String: Int] = [:]
+    mutating func id(_ payload: String) -> Int {
+        if let existing = index[payload] { return existing }
+        list.append(payload)
+        index[payload] = list.count - 1
+        return list.count - 1
+    }
+}
+
+enum SnapshotCodec {
+    static func write(_ color: Attribute.Color, _ w: inout SnapshotWriter) {
+        switch color {
+        case .ansi256(let code): w.u8(0); w.u8(code)
+        case .trueColor(let r, let g, let b): w.u8(1); w.u8(r); w.u8(g); w.u8(b)
+        case .defaultColor: w.u8(2)
+        case .defaultInvertedColor: w.u8(3)
+        }
+    }
+
+    static func readColor(_ r: inout SnapshotReader) throws -> Attribute.Color {
+        switch try r.u8() {
+        case 0: return .ansi256(code: try r.u8())
+        case 1: return .trueColor(red: try r.u8(), green: try r.u8(), blue: try r.u8())
+        case 2: return .defaultColor
+        case 3: return .defaultInvertedColor
+        default: throw TerminalStateSnapshotError.invalid("color")
+        }
+    }
+
+    static func write(_ attribute: Attribute, _ w: inout SnapshotWriter) {
+        w.u8(attribute.style.rawValue)
+        w.u8(attribute.underlineStyle.rawValue)
+        write(attribute.fg, &w)
+        write(attribute.bg, &w)
+        w.optional(attribute.underlineColor) { w, color in write(color, &w) }
+    }
+
+    static func readAttribute(_ r: inout SnapshotReader) throws -> Attribute {
+        let style = CharacterStyle(rawValue: try r.u8())
+        guard let underline = UnderlineStyle(rawValue: try r.u8()) else {
+            throw TerminalStateSnapshotError.invalid("underline style")
+        }
+        let fg = try readColor(&r)
+        let bg = try readColor(&r)
+        let underlineColor = try r.optional { try readColor(&$0) }
+        return Attribute(fg: fg, bg: bg, style: style, underlineStyle: underline, underlineColor: underlineColor)
+    }
+
+    static func attribute(_ r: inout SnapshotReader, _ table: [Attribute]) throws -> Attribute {
+        let id = try r.uint()
+        guard id < table.count else { throw TerminalStateSnapshotError.invalid("attribute index") }
+        return table[id]
+    }
+
+    static func write(_ charset: [UInt8: String]?, _ w: inout SnapshotWriter) {
+        w.optional(charset) { w, map in
+            w.uint(map.count)
+            for key in map.keys.sorted() { w.u8(key); w.string(map[key]!) }
+        }
+    }
+
+    static func readCharset(_ r: inout SnapshotReader) throws -> [UInt8: String]? {
+        try r.optional { r in
+            let count = try r.count(max: 256, "charset")
+            var map: [UInt8: String] = [:]
+            for _ in 0..<count { map[try r.u8()] = try r.string() }
+            return map
+        }
+    }
+
+    static func write(_ state: BidiPresentationState, _ w: inout SnapshotWriter) {
+        w.bool(state.supportMode == .explicit)
+        w.bool(state.autodetectDirection)
+        w.bool(state.fallbackDirection == .rightToLeft)
+        w.bool(state.boxMirroring)
+    }
+
+    static func readBidi(_ r: inout SnapshotReader) throws -> BidiPresentationState {
+        BidiPresentationState(supportMode: try r.bool() ? .explicit : .implicit,
+                              autodetectDirection: try r.bool(),
+                              fallbackDirection: try r.bool() ? .rightToLeft : .leftToRight,
+                              boxMirroring: try r.bool())
+    }
+
+    static func code(_ kind: SemanticPromptKind) -> UInt8 {
+        switch kind {
+        case .initial: return 0
+        case .right: return 1
+        case .continuation: return 2
+        case .secondary: return 3
+        }
+    }
+
+    static func kind(_ code: UInt8) throws -> SemanticPromptKind {
+        switch code {
+        case 0: return .initial
+        case 1: return .right
+        case 2: return .continuation
+        case 3: return .secondary
+        default: throw TerminalStateSnapshotError.invalid("prompt kind")
+        }
+    }
+
+    static func code(_ mode: Terminal.MouseMode) -> UInt8 {
+        switch mode {
+        case .off: return 0
+        case .x10: return 1
+        case .vt200: return 2
+        case .buttonEventTracking: return 3
+        case .anyEvent: return 4
+        }
+    }
+
+    static func mouseMode(_ code: UInt8) throws -> Terminal.MouseMode {
+        switch code {
+        case 0: return .off
+        case 1: return .x10
+        case 2: return .vt200
+        case 3: return .buttonEventTracking
+        case 4: return .anyEvent
+        default: throw TerminalStateSnapshotError.invalid("mouse mode")
+        }
+    }
+
+    static func code(_ encoding: Terminal.MouseProtocolEncoding) -> UInt8 {
+        switch encoding {
+        case .x10: return 0
+        case .utf8: return 1
+        case .sgr: return 2
+        case .urxvt: return 3
+        case .sgrPixel: return 4
+        }
+    }
+
+    static func mouseProtocol(_ code: UInt8) throws -> Terminal.MouseProtocolEncoding {
+        switch code {
+        case 0: return .x10
+        case 1: return .utf8
+        case 2: return .sgr
+        case 3: return .urxvt
+        case 4: return .sgrPixel
+        default: throw TerminalStateSnapshotError.invalid("mouse protocol")
+        }
+    }
+
+    static func code(_ conformance: Terminal.TerminalConformance) -> UInt8 {
+        switch conformance {
+        case .vt100: return 0
+        case .vt200: return 1
+        case .vt300: return 2
+        case .vt400: return 3
+        case .vt500: return 4
+        }
+    }
+
+    static func conformance(_ code: UInt8) throws -> Terminal.TerminalConformance {
+        switch code {
+        case 0: return .vt100
+        case 1: return .vt200
+        case 2: return .vt300
+        case 3: return .vt400
+        case 4: return .vt500
+        default: throw TerminalStateSnapshotError.invalid("conformance")
+        }
+    }
+
+    static func code(_ state: SemanticInputState) -> UInt8 {
+        switch state {
+        case .idle: return 0
+        case .prompt: return 1
+        case .armed: return 2
+        case .submitted: return 3
+        }
+    }
+
+    static func inputState(_ code: UInt8) throws -> SemanticInputState {
+        switch code {
+        case 0: return .idle
+        case 1: return .prompt
+        case 2: return .armed
+        case 3: return .submitted
+        default: throw TerminalStateSnapshotError.invalid("semantic input")
+        }
+    }
+
+    static func code(_ mode: SemanticPromptClickMode) -> UInt8 {
+        switch mode {
+        case .none: return 0
+        case .clickEventsAbsolute: return 1
+        case .clickEventsRelative: return 2
+        case .cursorKeys(.line): return 3
+        case .cursorKeys(.multiple): return 4
+        case .cursorKeys(.conservativeVertical): return 5
+        case .cursorKeys(.smartVertical): return 6
+        }
+    }
+
+    static func clickMode(_ code: UInt8) throws -> SemanticPromptClickMode {
+        switch code {
+        case 0: return .none
+        case 1: return .clickEventsAbsolute
+        case 2: return .clickEventsRelative
+        case 3: return .cursorKeys(.line)
+        case 4: return .cursorKeys(.multiple)
+        case 5: return .cursorKeys(.conservativeVertical)
+        case 6: return .cursorKeys(.smartVertical)
+        default: throw TerminalStateSnapshotError.invalid("click mode")
+        }
+    }
+
+    static let cursorStyles: [CursorStyle] = CursorStyle.allCases
+}
+
+// MARK: - Modes
+
+extension TerminalModesImage {
+    func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable) {
+        w.uint(cols); w.uint(rows); w.bool(altActive); w.uint(tabStopWidth)
+        w.string(cursorStyle.tagName)
+        w.bool(synchronizedOutputActive)
+        w.bool(applicationKeypad); w.bool(applicationCursor); w.bool(reverseColors)
+        for kitty in [kittyNormal, kittyAlt] {
+            w.int(kitty.flags)
+            w.uint(kitty.stack.count)
+            for flags in kitty.stack { w.int(flags) }
+        }
+        w.bool(sendFocus)
+        SnapshotCodec.write(currentBidiState, &w)
+        w.bool(bidiArrowKeySwap)
+        w.uint(savedPrivateModes.count)
+        for key in savedPrivateModes.keys.sorted() { w.int(key); w.bool(savedPrivateModes[key]!) }
+        w.bool(cursorHidden); w.bool(originMode); w.bool(marginMode); w.bool(insertMode); w.bool(wraparound)
+        w.bool(bracketedPasteMode); w.bool(alternateScrollMode); w.bool(colorSchemeUpdatesEnabled)
+        w.bool(colorSchemeIsLight)
+        SnapshotCodec.write(charset, &w)
+        w.uint(gCharsets.count)
+        for set in gCharsets { SnapshotCodec.write(set, &w) }
+        w.int(gcharset); w.bool(reverseWraparound)
+        w.uint(attributes.id(currentAttribute))
+        w.u8(gLevel); w.bool(cursorBlink); w.bool(allow80To132); w.bool(lineFeedMode); w.bool(smoothScroll)
+        w.uint(paletteOverrides.count)
+        for key in paletteOverrides.keys.sorted() {
+            let rgb = paletteOverrides[key]!
+            w.uint(key); w.uint(Int(rgb.red)); w.uint(Int(rgb.green)); w.uint(Int(rgb.blue))
+        }
+        w.bool(send8bit)
+        w.optional(hostCurrentDirectory) { $0.string($1) }
+        w.optional(hostCurrentDocument) { $0.string($1) }
+        w.u8(SnapshotCodec.code(mouseProtocol)); w.u8(SnapshotCodec.code(mouseMode))
+        w.bool(mouseShiftCapture)
+        w.bool(xtermTitleSetUtf); w.bool(xtermTitleSetHex); w.bool(xtermTitleQueryUtf); w.bool(xtermTitleQueryHex)
+        w.u8(SnapshotCodec.code(conformance))
+        switch activeHyperlink {
+        case .none: w.u8(0)
+        case .open(let payload): w.u8(1); w.string(payload)
+        case .unavailable: w.u8(2)
+        }
+        w.string(terminalTitle); w.string(iconTitle)
+        for stack in [terminalTitleStack, terminalIconStack] {
+            w.uint(stack.count)
+            for title in stack { w.string(title) }
+        }
+        w.bool(visibilityReportsEnabled); w.bool(inBandSizeReportsEnabled); w.bool(kittyPasteEventsEnabled)
+    }
+
+    init(_ r: inout SnapshotReader, attributes: [Attribute]) throws {
+        cols = try r.count(max: 65535, "cols"); rows = try r.count(max: 65535, "rows")
+        guard cols > 0, rows > 0 else { throw TerminalStateSnapshotError.invalid("grid") }
+        altActive = try r.bool(); tabStopWidth = try r.count(max: 65535, "tab stop width")
+        let styleName = try r.string()
+        guard let style = CursorStyle(tagName: styleName) else { throw TerminalStateSnapshotError.invalid("cursor style") }
+        cursorStyle = style
+        synchronizedOutputActive = try r.bool()
+        applicationKeypad = try r.bool(); applicationCursor = try r.bool(); reverseColors = try r.bool()
+        var kitty: [KittyKeyboardImage] = []
+        for _ in 0..<2 {
+            let flags = try r.int()
+            let count = try r.count(max: 1024, "kitty stack")
+            var stack: [Int] = []
+            for _ in 0..<count { stack.append(try r.int()) }
+            kitty.append(KittyKeyboardImage(flags: flags, stack: stack))
+        }
+        kittyNormal = kitty[0]; kittyAlt = kitty[1]
+        sendFocus = try r.bool()
+        currentBidiState = try SnapshotCodec.readBidi(&r)
+        bidiArrowKeySwap = try r.bool()
+        let savedCount = try r.count(max: 65536, "saved modes")
+        var saved: [Int: Bool] = [:]
+        for _ in 0..<savedCount { saved[try r.int()] = try r.bool() }
+        savedPrivateModes = saved
+        cursorHidden = try r.bool(); originMode = try r.bool(); marginMode = try r.bool()
+        insertMode = try r.bool(); wraparound = try r.bool()
+        bracketedPasteMode = try r.bool(); alternateScrollMode = try r.bool(); colorSchemeUpdatesEnabled = try r.bool()
+        colorSchemeIsLight = try r.bool()
+        charset = try SnapshotCodec.readCharset(&r)
+        let setCount = try r.count(max: 16, "charsets")
+        var sets: [[UInt8: String]?] = []
+        for _ in 0..<setCount { sets.append(try SnapshotCodec.readCharset(&r)) }
+        gCharsets = sets
+        gcharset = try r.int(); reverseWraparound = try r.bool()
+        currentAttribute = try SnapshotCodec.attribute(&r, attributes)
+        gLevel = try r.u8(); cursorBlink = try r.bool(); allow80To132 = try r.bool()
+        lineFeedMode = try r.bool(); smoothScroll = try r.bool()
+        let paletteCount = try r.count(max: 4096, "palette")
+        var palette: [Int: RGB16] = [:]
+        for _ in 0..<paletteCount {
+            let key = try r.uint()
+            palette[key] = RGB16(red: UInt16(truncatingIfNeeded: try r.uint()),
+                                 green: UInt16(truncatingIfNeeded: try r.uint()),
+                                 blue: UInt16(truncatingIfNeeded: try r.uint()))
+        }
+        paletteOverrides = palette
+        send8bit = try r.bool()
+        hostCurrentDirectory = try r.optional { try $0.string() }
+        hostCurrentDocument = try r.optional { try $0.string() }
+        mouseProtocol = try SnapshotCodec.mouseProtocol(try r.u8())
+        mouseMode = try SnapshotCodec.mouseMode(try r.u8())
+        mouseShiftCapture = try r.bool()
+        xtermTitleSetUtf = try r.bool(); xtermTitleSetHex = try r.bool()
+        xtermTitleQueryUtf = try r.bool(); xtermTitleQueryHex = try r.bool()
+        conformance = try SnapshotCodec.conformance(try r.u8())
+        switch try r.u8() {
+        case 0: activeHyperlink = .none
+        case 1: activeHyperlink = .open(try r.string())
+        case 2: activeHyperlink = .unavailable
+        default: throw TerminalStateSnapshotError.invalid("hyperlink")
+        }
+        terminalTitle = try r.string(); iconTitle = try r.string()
+        var stacks: [[String]] = []
+        for _ in 0..<2 {
+            let count = try r.count(max: 4096, "title stack")
+            var stack: [String] = []
+            for _ in 0..<count { stack.append(try r.string()) }
+            stacks.append(stack)
+        }
+        terminalTitleStack = stacks[0]; terminalIconStack = stacks[1]
+        visibilityReportsEnabled = try r.bool(); inBandSizeReportsEnabled = try r.bool()
+        kittyPasteEventsEnabled = try r.bool()
+    }
+}
+
+// MARK: - Buffers and lines
+
+extension BufferImage {
+    func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable, payloads: inout PayloadTable) {
+        w.uint(cols); w.uint(rows)
+        w.optional(scrollback) { $0.uint($1) }
+        w.uint(lines.count)
+        for line in lines { line.encode(&w, attributes: &attributes, payloads: &payloads) }
+        for value in [x, y, yBase, yDisp, xDisp, xBase, linesTop, scrollTop, scrollBottom, marginLeft, marginRight] {
+            w.int(value)
+        }
+        w.uint(tabStops.count)
+        var packed: UInt8 = 0
+        for (index, stop) in tabStops.enumerated() {
+            if stop { packed |= 1 << UInt8(index % 8) }
+            if index % 8 == 7 { w.u8(packed); packed = 0 }
+        }
+        if tabStops.count % 8 != 0 { w.u8(packed) }
+        w.int(savedX); w.int(savedY)
+        w.bool(savedOriginMode); w.bool(savedMarginMode); w.bool(savedWraparound); w.bool(savedReverseWraparound)
+        w.uint(attributes.id(savedAttr))
+        SnapshotCodec.write(savedCharset, &w)
+        w.bool(insertMode); w.bool(marginMode); w.bool(wraparound)
+        w.u8(CellArena.semanticContentCode(for: semanticContent))
+        w.u8(SnapshotCodec.code(semanticInput))
+        w.u8(SnapshotCodec.code(semanticClickMode))
+        w.bool(semanticUsesSpecialCursorKeys)
+        w.optional(semanticPromptStartRow) { $0.int($1) }
+        w.uvar(semanticGroupCounter); w.uvar(activeSemanticGroupID)
+        SnapshotCodec.write(defaultBidiState, &w)
+    }
+
+    init(_ r: inout SnapshotReader, attributes: [Attribute], payloads: [String]) throws {
+        cols = try r.count(max: 65535, "buffer cols"); rows = try r.count(max: 65535, "buffer rows")
+        scrollback = try r.optional { try $0.uint() }
+        let lineCount = try r.count(max: r.bytes.count, "lines")
+        var decoded: [LineImage] = []
+        decoded.reserveCapacity(lineCount)
+        for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
+        lines = decoded
+        let maximum = (scrollback ?? 0) + rows
+        guard lines.count <= maximum else { throw TerminalStateSnapshotError.invalid("more lines than the buffer holds") }
+        x = try r.int(); y = try r.int(); yBase = try r.int(); yDisp = try r.int()
+        xDisp = try r.int(); xBase = try r.int(); linesTop = try r.int()
+        scrollTop = try r.int(); scrollBottom = try r.int(); marginLeft = try r.int(); marginRight = try r.int()
+        guard x >= 0, y >= 0, yBase >= 0, yDisp >= 0, scrollTop >= 0, scrollBottom >= 0 else {
+            throw TerminalStateSnapshotError.invalid("negative cursor or region")
+        }
+        let stopCount = try r.count(max: 65535, "tab stops")
+        var stops: [Bool] = []
+        stops.reserveCapacity(stopCount)
+        var packed: UInt8 = 0
+        for index in 0..<stopCount {
+            if index % 8 == 0 { packed = try r.u8() }
+            stops.append(packed & (1 << UInt8(index % 8)) != 0)
+        }
+        tabStops = stops
+        savedX = try r.int(); savedY = try r.int()
+        savedOriginMode = try r.bool(); savedMarginMode = try r.bool()
+        savedWraparound = try r.bool(); savedReverseWraparound = try r.bool()
+        savedAttr = try SnapshotCodec.attribute(&r, attributes)
+        savedCharset = try SnapshotCodec.readCharset(&r)
+        insertMode = try r.bool(); marginMode = try r.bool(); wraparound = try r.bool()
+        semanticContent = CellArena.semanticContent(for: try r.u8())
+        semanticInput = try SnapshotCodec.inputState(try r.u8())
+        semanticClickMode = try SnapshotCodec.clickMode(try r.u8())
+        semanticUsesSpecialCursorKeys = try r.bool()
+        semanticPromptStartRow = try r.optional { try $0.int() }
+        semanticGroupCounter = try r.uvar(); activeSemanticGroupID = try r.uvar()
+        defaultBidiState = try SnapshotCodec.readBidi(&r)
+    }
+}
+
+extension LineImage {
+    // Cell flag bits.
+    static let newAttribute: UInt8 = 1 << 0
+    static let unusualWidth: UInt8 = 1 << 1
+    static let hasGraphemes: UInt8 = 1 << 2
+    static let hasPayload: UInt8 = 1 << 3
+    static let hasSemantic: UInt8 = 1 << 4
+    static let protected: UInt8 = 1 << 5
+
+    func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable, payloads: inout PayloadTable) {
+        w.uint(cols); w.bool(isWrapped)
+        SnapshotCodec.write(bidiState, &w)
+        w.u8(renderMode)
+        w.uint(semanticMarks.count)
+        for mark in semanticMarks { w.u8(SnapshotCodec.code(mark.kind)); w.int(mark.column); w.uvar(mark.group) }
+        w.optional(hardContinuationGroup) { $0.uvar($1) }
+        let tail = attributes.id(tailAttribute)
+        w.uint(tail)
+        w.uint(cells.count)
+        var previous = tail
+        for cell in cells {
+            let attribute = attributes.id(cell.attribute)
+            var flags: UInt8 = 0
+            if attribute != previous { flags |= LineImage.newAttribute }
+            if cell.width != 1 || cell.widthState != 0 { flags |= LineImage.unusualWidth }
+            if cell.graphemes != nil { flags |= LineImage.hasGraphemes }
+            if cell.payload != nil { flags |= LineImage.hasPayload }
+            if cell.semantic != 0 { flags |= LineImage.hasSemantic }
+            if cell.isProtected { flags |= LineImage.protected }
+            w.u8(flags)
+            if attribute != previous { w.uint(attribute); previous = attribute }
+            w.int(Int(cell.code))
+            if flags & LineImage.unusualWidth != 0 { w.int(Int(cell.width)); w.u8(cell.widthState) }
+            if let graphemes = cell.graphemes {
+                w.uint(graphemes.count)
+                for scalar in graphemes { w.uvar(UInt64(scalar)) }
+            }
+            if let payload = cell.payload { w.uint(payloads.id(payload)) }
+            if cell.semantic != 0 { w.u8(cell.semantic) }
+        }
+    }
+
+    init(_ r: inout SnapshotReader, attributes: [Attribute], payloads: [String]) throws {
+        cols = try r.count(max: 65535, "line cols")
+        isWrapped = try r.bool()
+        bidiState = try SnapshotCodec.readBidi(&r)
+        renderMode = try r.u8()
+        let markCount = try r.count(max: 64, "marks")
+        var marks: [SemanticMark] = []
+        for _ in 0..<markCount {
+            marks.append(SemanticMark(kind: try SnapshotCodec.kind(try r.u8()), column: try r.int(), group: try r.uvar()))
+        }
+        semanticMarks = marks
+        hardContinuationGroup = try r.optional { try $0.uvar() }
+        tailAttribute = try SnapshotCodec.attribute(&r, attributes)
+        var current = tailAttribute
+        let cellCount = try r.count(max: cols, "cells")
+        var decoded: [CellImage] = []
+        decoded.reserveCapacity(cellCount)
+        for _ in 0..<cellCount {
+            let flags = try r.u8()
+            if flags & LineImage.newAttribute != 0 { current = try SnapshotCodec.attribute(&r, attributes) }
+            let code = try r.int()
+            guard code >= Int(Int32.min), code <= Int(Int32.max) else { throw TerminalStateSnapshotError.invalid("code") }
+            var width: Int8 = 1
+            var widthState: UInt8 = 0
+            if flags & LineImage.unusualWidth != 0 {
+                let w = try r.int()
+                guard w >= Int(Int8.min), w <= Int(Int8.max) else { throw TerminalStateSnapshotError.invalid("width") }
+                width = Int8(w)
+                widthState = try r.u8()
+            }
+            var graphemes: [UInt32]? = nil
+            if flags & LineImage.hasGraphemes != 0 {
+                let count = try r.count(max: 64, "grapheme")
+                var scalars: [UInt32] = []
+                for _ in 0..<count { scalars.append(UInt32(truncatingIfNeeded: try r.uvar())) }
+                graphemes = scalars
+            }
+            var payload: String? = nil
+            if flags & LineImage.hasPayload != 0 {
+                let id = try r.uint()
+                guard id < payloads.count else { throw TerminalStateSnapshotError.invalid("payload index") }
+                payload = payloads[id]
+            }
+            let semantic: UInt8 = flags & LineImage.hasSemantic != 0 ? try r.u8() : 0
+            decoded.append(CellImage(attribute: current, code: Int32(code), graphemes: graphemes,
+                                     width: width, widthState: widthState, payload: payload,
+                                     semantic: semantic, isProtected: flags & LineImage.protected != 0))
+        }
+        cells = decoded
+    }
+}

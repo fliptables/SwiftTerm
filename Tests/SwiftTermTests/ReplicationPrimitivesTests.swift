@@ -34,6 +34,7 @@ final class ReplicationPrimitivesTests {
         "\u{1b}[?u",             // Kitty keyboard flags query
         "\u{1b}[18t",            // text area size report
         "\u{1b}P$qm\u{1b}\\",    // DECRQSS
+        "\u{1b}[?1004h",         // focus reporting on: reports the current focus
     ]
 
     @Test(arguments: queries)

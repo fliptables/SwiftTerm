@@ -178,6 +178,13 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// contents (cells, isWrapped, renderMode, images). Renderers that cache per-line
     /// draw state can compare this counter against a cached value to detect in-place
     /// changes without diffing individual cells.
+    /// The written prefix length; every cell after it is the tail blank.
+    var replicationUsedLength: Int { usedLength }
+    /// The attribute of the blank that fills the line after its written prefix.
+    var replicationTailAttribute: Attribute { storage.arena.attribute(for: tailBlankCell) }
+    /// Restores the OSC 133 marks of an imported line.
+    func replicationSetSemanticMarks(_ marks: [SemanticMark]) { semanticMarks = marks }
+
     public var generation: UInt64 { _generation }
     private(set) var _generation: UInt64 = 0
 
