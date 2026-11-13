@@ -1,12 +1,17 @@
 # IT-2001: plan for merging upstream SwiftTerm into `scape-selection-api`
 
-Date: 2026-11-13. Nash said go. This is the plan a builder follows in a fresh worktree; this branch stays docs only. Evidence is in `2026-11-13-it2001-upstream-merge-scoping-findings.md` ("the findings"). Tags: **[M]** measured (source named), **[I]** inferred. Revision 2 folds in the daemon lead's design read (two P1s, conditions C1 to C6) and the Codex plan review (three P1s, six P2s, two P3s; cited as X1 to X11).
+Date: 2026-11-13. Nash said go. This is the plan a builder follows in a fresh worktree; this branch stays docs only. Evidence is in `2026-11-13-it2001-upstream-merge-scoping-findings.md` ("the findings"). Tags: **[M]** measured (source named), **[I]** inferred. Revision 3 (final) folds in the daemon lead's design read (two P1s, conditions C1 to C6), the Codex plan review (cited as X1 to X11) and its delta (the Embedded guarantee; three P2s).
 
 Merge target: upstream `d4f52faaa` into fork `1b21b1bf3` (base `5cb37e865`; 12 conflicted files, 27 hunks). If upstream has moved when the builder starts, the builder still merges `d4f52faaa`.
 
 ## 1. Outcome and order
 
-1. **Fork PR A (prep, on today's base, no behaviour change):** delete `TerminalReplayStream.swift`; one accessor block per class in place of the access widenings; the parser hook as one function. **May start now.**
+1. **Fork PR A (prep, on today's base `1b21b1bf3`, no behaviour change). May start now.** Exactly three things:
+   - **Delete `Sources/SwiftTerm/TerminalReplayStream.swift`.** Nothing else in the fork's sources or tests refers to it **[M]** (`git grep ReplayStream`).
+   - **One accessor block per class.** Revert every `private` / `private(set)` → internal widening the replication commits made in `Terminal.swift` and `Buffer.swift` (the list is `git diff ee7c4a3..1b21b1bf3` on those two files; about 30 and 7 declarations). In their place add one marked, contiguous block of internal accessors in each of `Terminal`, `Buffer` and `BufferLine` (the existing `replication…` members of `BufferLine` move into its block), and make the four replication files use only those blocks and public API. Stored property names do not change, so the digest's exclusion lists do not change. The fork's two new stored fields on `Terminal` stay where they are in PR A; they move behind upstream's `cold` holder in PR B (D3), because that holder does not exist on today's base.
+   - **The parser hook as one `@inline(__always)` function** called from the one place the inline block sits today (the loop's tail), same logic, same fields.
+
+   PR A's gate: `swift build` and the whole `swift test` on macOS, with the same test counts as before it; no test file changes except references forced by the accessor rename. It does not move Scape's pin. It merges into `scape-selection-api` as a merge commit.
 2. **Fork PR B (the merge, the format revision and the proofs: one review).** Its first commit is a true two-parent merge of `d4f52faaa`.
 3. **Scape pin-bump PR**, pinned to PR B's merge commit on `scape-selection-api`.
 4. **Scape PR #1289 (S2.3, the session host) re-gates on the bumped pin.** It does not merge on the old pin.
@@ -33,9 +38,8 @@ Scape PR #1289 ("tether", S2.3, on hold at `46faf0eff`) is written on `HeadlessT
 
 **#1289's re-gate list gains** (owned by its builder, named here so it is not lost):
 
-- one test that a failed launch arrives as ordinary ring output (upstream writes "Process launch failed" into the terminal through `dataReceived`, so it passes `onOutput`) **[M]**;
 - its exit path makes the one program-status call of section 5, **ordered after the final output entry and before any snapshot taken after the exit** (one test: a snapshot taken after exit shows the exited status and the last output) (X9);
-- **a failed launch cannot leave a session "starting"**: upstream's `processFailedToStart` calls `onLaunchFailure`, or writes diagnostic output, and does not call `onEnd` **[M]** (upstream `HeadlessTerminal.swift`, that function's body), so the host ends the session from its own spawn check (it already throws on `pid <= 0`) or from `onLaunchFailure`; one test (X9);
+- **a failed launch cannot leave a session "starting"**: upstream's `processFailedToStart` calls `onLaunchFailure`, or writes diagnostic output, and does not call `onEnd` **[M]** (upstream `HeadlessTerminal.swift`, that function's body), so the host ends the session from its own spawn check (it already throws on `pid <= 0`) or from `onLaunchFailure`. Upstream's `if … else` does one or the other, never both, so **two tests**: with no `onLaunchFailure`, the diagnostic text arrives as ordinary ring output and the session still ends; with a custom `onLaunchFailure`, there is no diagnostic output and the session ends from the callback (X9);
 - it stays as written on `childfd`. Upstream's `LocalProcess.updateWindowSize(_:)` is `public` (internal in the fork) **[M]**; taking it is **a ticket after #1289 merges**, a separate small PR, whose builder first quotes upstream's body, its lock and queue, and whether the host's thread may call it.
 
 **Fallback.** Lloyd makes the call at whichever comes first: #1289 has everything it needs except the pin, or the end of working day 5 **counted from the day PR A's builder starts**. If PR B has not passed its gate (section 8) by then: #1289 merges on the old pin, the merge lane continues, the pin bump lands before S2.4 starts, and #1289's fixtures are regenerated with it. **Condition: under the fallback no build containing the session host leaves the building before the pin bump** (otherwise v1 is a shipped format). "Merged" is not "shipped": on developer machines the bump then means a **clean daemon restart**; no v1 snapshot or chunk is kept on disk (they exist only on the wire and in fixtures), and a v1 peer is **refused** by the version check, never converted (X9).
@@ -57,7 +61,7 @@ Scape PR #1289 ("tether", S2.3, on hold at `46faf0eff`) is written on `HeadlessT
 
 ## 4. The proofs, inside PR B
 
-### P1. With `synchronizedOutputTimeout == nil`, no timer runs or fires; the view still knows a synchronized update is open
+### P1. With `synchronizedOutputTimeout == nil`: no timer is requested; in the builds we ship, a timer armed earlier cannot fire; the view still knows a synchronized update is open
 
 **What each receiver does with `active`** (**[M]**, trial tree; the builder re-quotes from the merged tree before coding):
 
@@ -75,8 +79,8 @@ Why the gate must move: the fork's guard sits inside the function's normal-build
 
 1. **Gate.** `reconcileSynchronizedOutputWatchdog` is `final` and is the only caller of `apply…`; with the timeout `nil` it passes "not active". `Terminal.synchronizedOutputActive` is untouched.
 2. **Setter reconciliation.** Setting `nil` cancels the terminal's own item (today) **and** marks the watchdog dirty and reconciles under `terminalLock`, so the view's watchdog is disarmed too (today it is not). Setting a value while a window is open re-arms.
-3. **Stale-callback rejection, in one place.** Both timer paths end in `Terminal.synchronizedOutputWatchdogFired(generation:)` (the terminal's own item, `:9281-9285`; the view's `Target.fire`, `SynchronizedOutputWatchdog.swift:114`) **[M]**. It returns without effect when the timeout is `nil`, in addition to its `active` and `generation` checks. A callback already in flight when `nil` is set therefore changes nothing.
-4. **Embedded contract.** The host timer is requested only through the same gate, so it is never requested with `nil`. SwiftTerm cannot cancel a host timer already requested, and upstream's host calls the public `expireSynchronizedOutput()`, which must keep working with `nil` (it is how a replica applies the owner's event). So for Embedded the rule is written at the delegate method: **a host that sets `nil` drops its own pending timer; a late call is treated as an ordered expiry.** We do not build or ship Embedded; this path is proved by construction (pins 7 and 8), and the plan says so plainly (X10).
+3. **Stale-callback rejection, normal build, in one place.** The terminal's own item (`:9281-9285`) and the view's `Target.fire` (`SynchronizedOutputWatchdog.swift:114`) both end in `Terminal.synchronizedOutputWatchdogFired(generation:)` **[M]**, which exists only under `#if !SWIFTTERM_EMBEDDED`. It returns without effect when the timeout is `nil`, in addition to its `active` and `generation` checks. A callback already in flight when `nil` is set therefore changes nothing.
+4. **Embedded: a narrower guarantee, stated as such.** In an Embedded build SwiftTerm guarantees only that **no timer is REQUESTED while the timeout is `nil`** (the request goes through the same gate). It does not reject a timer requested earlier: the Embedded host's timer calls the public `expireSynchronizedOutput()`, there is no generation on that path, and that same call is the host's ordered valve, which must work with `nil` (it is how a replica applies the owner's event, and how the daemon's own valve fires). So: **a host that sets `nil` must drop its own pending timer; a late public expiry is indistinguishable from the host's ordered valve and is applied as one.** This is written at the delegate method. Nobody ships Embedded and we do not build it; the guarantee is proved by a pure decision function and a source pin (pins 7 and 8). Option (b), a generation-bearing host entry point, is not taken: it would change upstream's host contract for a build we do not have.
 
 **Pins** (no wall-clock dependence: counters, recording delegates, callbacks delivered by hand):
 
@@ -84,8 +88,8 @@ Why the gate must move: the fork's guard sits inside the function's normal-build
 2. `ViewTerminal`, `nil`, DEC 2026 open: **the view still holds its display** and the view watchdog's `armed == 0`.
 3. `ViewTerminal`, `nil`: `expireSynchronizedOutput()` returns `true` once; **the view is released and redraws**.
 4. **Arm → set `nil` → deliver the old callback**, plain `Terminal`: the captured work item is run by hand; the mode stays active; `fired` does not advance.
-5. **Arm → set `nil` → deliver the old callback**, `ViewTerminal`: the view watchdog is disarmed by the setter; `Target.fire()` called by hand changes nothing.
-6. **Arm → set `nil` → deliver the old callback**, host timer: the normal-build seam (pin 7) records one request before `nil`, none after; a direct call to `synchronizedOutputWatchdogFired` with the old generation changes nothing.
+5. **Arm → set `nil` → deliver the old callback**, `ViewTerminal`, two cases: (a) `Target.fire()` called by hand after the setter disarmed it returns before reaching the terminal; (b) **a callback already past the target's lock**: capture the armed generation, set `nil`, then deliver `synchronizedOutputWatchdogFired(generation:)` to the terminal with the captured generation: the mode stays active, the view still holds its display, `fired` does not advance.
+6. **Host timer, the narrowed guarantee only:** through the decision function's seam, one request is recorded while a value is set and **none after `nil`**, across re-entry into DEC 2026. And the stated consequence is pinned as a fact, not hidden: with `nil` and the mode open, a public `expireSynchronizedOutput()` (a late host timer or the ordered valve, the same call) ends the mode and returns `true`. No test claims a late host callback is rejected.
 7. The decision "request a timer, cancel, or nothing" is one pure function of (active, timeout is nil, armed generation), used by all three branches and unit-tested in the normal build.
 8. Source pins: no `override func reconcileSynchronizedOutputWatchdog`; the Embedded branch's only timer request is on that function's result.
 
@@ -95,6 +99,7 @@ Why the gate must move: the fork's guard sits inside the function's normal-build
 
 - **the reply sink** (`sendQueryResponse`, gated by `respondsToQueries`): every byte generated from parsed input. That is the whole `sendResponse` family (labelled text, unlabelled text, bytes, prefix + text, prefix + bytes, prefix + text + suffix, variadic), the focus report sent when DECSET 1004 is enabled, and Kitty clipboard replies.
 - **the user-input sink** (not gated): `sendUserInput`, paste (including Kitty paste), mouse packets (D8), semantic-prompt click packets and repeated semantic cursor movement, and focus reports caused by a real focus change. Upstream sends the semantic click through `sendResponse` (`Terminal.swift:3540` upstream) **[M]**; it moves to the user-input sink, or a replica's clicks would be swallowed.
+- **Both sinks are TRANSPORT only.** Input **registration** (`registerUserInput`, the OSC 133 submission scanner) is a separate call and is not folded into the user-input sink. It stays exactly where it is today: once in `sendUserInput`, once per paste in the Kitty clipboard path, once per send in `HeadlessTerminal.send` **[M]** (trial `Terminal.swift:3191`, `KittyClipboardProtocol.swift:987,1009`, `HeadlessTerminal.swift:113,123`); mouse packets, semantic clicks and focus reports are **not** registered, as today.
 
 Pinned:
 
@@ -102,6 +107,7 @@ Pinned:
 - **Site table:** the builder enumerates, from the merged tree, every call that reaches either sink and records it in the findings record with its sink. `git log -S` is only a cross-check.
 - **Behaviour, one case per reply site in that table**, including a clipboard reply and the 1004 enable-time focus report: the owner sends the expected bytes; a terminal with `respondsToQueries == false` sends none.
 - **Behaviour, user input on a replica:** a mouse packet, a semantic click, a paste and `sendUserInput` are all sent with `respondsToQueries == false`.
+- **Registration, pinned against the pre-merge behaviour:** with a prompt armed, keyboard input and a paste each register exactly once (a counting seam; the armed state moves to submitted on a newline exactly as before); a mouse packet, a semantic click and a focus report register zero times and leave the armed state alone.
 
 ### P3. The census and the digest prove different things (X3)
 
@@ -154,7 +160,7 @@ One PR, one review, commits in this order. **The gate runs at the head.**
 1. A snapshot is taken under `terminalLock`, between feeds; `pendingParserBytes` fed to a fresh parser puts it in the same state; `nil` means "wait".
 2. Owner and replica digests are equal at every cut of the corpus, and after the rest of the stream, whole and streamed.
 3. A replica writes nothing to its delegate except user input.
-4. With `synchronizedOutputTimeout == nil`, DEC 2026 ends only by the application's reset or by `expireSynchronizedOutput()`; a view shows the held frame until then.
+4. With `synchronizedOutputTimeout == nil`, DEC 2026 ends only by the application's reset or by a call to `expireSynchronizedOutput()`; a view shows the held frame until then. (In an Embedded build that call may also come from a host timer the host failed to drop; section 4, P1.)
 5. No state change in the owner is invisible to the replica: it follows from a byte, from an ordered event (resize, valve, exit), or it is a census exclusion.
 6. A decoder never half-decodes: wrong magic, version or length throws before any state changes.
 7. A history chunk is refused, changing nothing, once its buffer's grid has changed.
@@ -179,7 +185,7 @@ One PR, one review, commits in this order. **The gate runs at the head.**
 | Suite | Bar |
 |---|---|
 | Compile-only Xcode build of the app and test targets (C2) | clean |
-| The python guards (C2): `check-headless-core.py` (pins agree), `check-required-tests.py`, `check-headless-inert.py`. This is my reading of "the three"; the builder runs every `scripts/check-*.py` the headless runner runs. | pass |
+| The three python guards (C2): `scripts/check-headless-inert.py`, `scripts/check-required-tests.py` (`--source-only` for a class subset), `scripts/check-app-db-writes.py`; and a fourth check, `scripts/check-headless-core.py` (the pins agree). The builder runs every `check-*.py` the headless runner runs. | pass |
 | **A sweep of `ScapeTests` and `Headless/Tests` for source-text pins** that name a SwiftTerm symbol or the pin SHA (tests that read source files as text), each updated or confirmed (C2) | listed in the PR |
 | T3 full sweep (`SCAPE_T3_FULL=1`) | every cut passes whole and streamed; the comparator tells every one-byte-earlier pair apart; counts reported beside the last run's (1,238 cuts, 8 resyncs, 2,440 pairs); a count that moved is explained |
 | Full Mac headless run with `required-tests.tsv` | all required identities exactly once |
