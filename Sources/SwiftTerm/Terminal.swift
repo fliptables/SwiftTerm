@@ -904,6 +904,19 @@ open class Terminal {
             || !readingBuffer.putbackBuffer.isEmpty
     }
 
+    /// Whether the parser records the sequence it has open, so that
+    /// ``pendingParserBytes`` can report it and ``exportState()`` can export
+    /// mid-sequence. Default `false`: the record costs parse time, so only a
+    /// terminal that exports turns it on, before its first feed. Set under
+    /// `terminalLock`, between feeds.
+    ///
+    /// At ground ``pendingParserBytes`` is `[]` (plus any partial UTF-8
+    /// character) whether this is on or off. Inside a sequence the record does
+    /// not cover, it is `nil`, "wait": with this off; or after turning it on
+    /// while that sequence was open. The next feed that
+    /// returns the parser to ground (or starts a new sequence, with this on)
+    /// ends the wait. Turning it off empties the recorded bytes.
+    /// ``hasPendingSequence`` does not depend on it.
     public var recordsPendingParserBytes: Bool {
         get { parser.recordsPendingBytes }
         set { parser.recordsPendingBytes = newValue }
@@ -913,12 +926,15 @@ open class Terminal {
     /// second terminal fed them resumes in the same parser state. A C0 control
     /// executed inside the sequence is left out, because its effect is already
     /// in this terminal's state. Empty when ``hasPendingSequence`` is false.
-    /// `nil` means "wait": the open sequence is larger than the parser keeps
-    /// (an image transfer), so no snapshot can be taken (``exportState()``
-    /// returns `nil`); the next feed that returns the parser to ground ends
-    /// the wait. Read under `terminalLock`, between feeds.
+    /// `nil` means "wait": a sequence is open that the parser has not
+    /// recorded (``recordsPendingParserBytes`` is off, or was turned on inside
+    /// it, or it is larger than the parser keeps, as an image transfer), so
+    /// no snapshot can be taken (``exportState()`` returns `nil`); the next
+    /// feed that returns the parser to ground ends the wait. Read under
+    /// `terminalLock`, between feeds.
     public var pendingParserBytes: [UInt8]? {
         if parser.pendingSequenceOverflowed { return nil }
+        if !parser.recordsPendingBytes && parser.currentState != .ground { return nil }
         if readingBuffer.putbackBuffer.isEmpty { return parser.pendingSequenceBytes }
         return readingBuffer.putbackBuffer + parser.pendingSequenceBytes
     }

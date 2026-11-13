@@ -525,7 +525,19 @@ final class EscapeSequenceParser {
     /// the open sequence verbatim; one larger than this (an image transfer)
     /// is reported as overflowed so the caller waits for it to finish.
     static let maximumPendingSequenceBytes = 256 * 1024
-    var recordsPendingBytes = false
+    /// Whether the parse loop keeps ``pendingSequenceBytes`` (IT-2001 D4: the
+    /// record costs time on every sequence, so only a terminal that exports
+    /// turns it on). `Terminal.recordsPendingParserBytes` stores it here; each
+    /// parse call reads it once. Turning it on inside a sequence marks the
+    /// record overflowed (that sequence is not covered); turning it off
+    /// empties the record. A reset keeps it: it is the host's setting.
+    var recordsPendingBytes = false {
+        didSet {
+            guard recordsPendingBytes != oldValue else { return }
+            pendingSequenceBytes = []
+            pendingSequenceOverflowed = recordsPendingBytes && currentState != .ground
+        }
+    }
 
     private var didResetDuringParse = false
     private var resetSerial = 0
@@ -1360,6 +1372,8 @@ final class EscapeSequenceParser {
         // inside it. See `recordPendingSequence`.
         var sequenceStart = -1
         var sequenceSkips: [Int] = []
+        // Read once per call; set only between feeds.
+        let records = recordsPendingBytes
 
         func ownedSlice(_ range: Range<Int>) -> ArraySlice<UInt8> {
             let result = data.extracting(range).copiedBytes()
@@ -1692,9 +1706,11 @@ final class EscapeSequenceParser {
             case .reserved:
                 break
             }
-            EscapeSequenceParser.noteSequenceBoundary(
-                action: action, code: code, index: i, from: currentState, to: transition & 15,
-                sequenceStart: &sequenceStart, sequenceSkips: &sequenceSkips)
+            if records {
+                EscapeSequenceParser.noteSequenceBoundary(
+                    action: action, code: code, index: i, from: currentState, to: transition & 15,
+                    sequenceStart: &sequenceStart, sequenceSkips: &sequenceSkips)
+            }
             currentState = transition & 15
             i += consumed
         }
@@ -1721,8 +1737,10 @@ final class EscapeSequenceParser {
         _pars = pars
         _parsColonMask = parsColonMask
         _parameterLimitExceeded = parameterLimitExceeded
-        recordPendingSequence(data, sequenceStart: sequenceStart, skipped: sequenceSkips,
-                              endState: currentState)
+        if records {
+            recordPendingSequence(data, sequenceStart: sequenceStart, skipped: sequenceSkips,
+                                  endState: currentState)
+        }
 
         // save active dcs handler reference
         activeDcsHandler = dcsHandler
