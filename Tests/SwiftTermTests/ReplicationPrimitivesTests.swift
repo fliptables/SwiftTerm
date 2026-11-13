@@ -216,9 +216,11 @@ final class ReplicationPrimitivesTests {
         terminal.synchronizedOutputTimeout = nil
         #expect(terminal.synchronizedOutputActive)
         #expect(terminal.synchronizedOutputTimeout == nil)
+        // IT-2001 D7: the setter cancels through the watchdog's reconcile, which counts it.
+        #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 1)
         // The armed item was cancelled, so ending the mode records no cancellation of a live timer.
         terminal.feed(text: "\u{1b}[?2026l")
-        #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 0)
+        #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 1)
     }
 
     // MARK: onOutput
