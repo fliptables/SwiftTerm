@@ -313,9 +313,9 @@ public final class Buffer {
         line.owningBufferRef = selfRef
     }
     
-    private var insertMode: Bool = false
-    private var marginMode: Bool = false
-    private var wraparound: Bool = false
+    private(set) var insertMode: Bool = false
+    private(set) var marginMode: Bool = false
+    private(set) var wraparound: Bool = false
 
     // OSC 133 state belongs to a buffer so switching to the alternate screen
     // cannot leak an in-progress shell prompt into the normal screen.
@@ -332,8 +332,8 @@ public final class Buffer {
     // mark, plus a cached row index. No scroll, splice, margin, trim, or
     // reflow path knows this cache exists: the read path revalidates with
     // one pointer compare and rescans outward when the line moved.
-    private var semanticPromptStartLine: BufferLine?
-    private var semanticPromptStartRowCache = 0
+    var semanticPromptStartLine: BufferLine?
+    var semanticPromptStartRowCache = 0
     private(set) var semanticPromptRowScanCount = 0
 
     // A monotonic prompt-group counter. `beginSemanticPromptGroup` advances it;
@@ -341,8 +341,8 @@ public final class Buffer {
     // stamped with the current value, and R5 derivation follows a hard link
     // only when the epochs agree — that is what isolates a new prompt from an
     // old group's stranded continuation rows.
-    private var semanticGroupCounter: UInt64 = 0
-    private(set) var activeSemanticGroupID: UInt64 = 0
+    var semanticGroupCounter: UInt64 = 0
+    var activeSemanticGroupID: UInt64 = 0
 
     var semanticPromptStartRow: Int? {
         guard let startLine = semanticPromptStartLine else { return nil }

@@ -1581,7 +1581,7 @@ final class KittyClipboardProtocol: @unchecked Sendable {
     /// Hands one prepared response to the output sink without another copy.
     private func send(_ bytes: [UInt8], to terminal: Terminal) {
         guard !bytes.isEmpty else { return }
-        terminal.tdel?.send(source: terminal, data: bytes[...])
+        terminal.sendQueryResponse(bytes[...])
     }
 
     /// The three-packet type-list reply: `OK`, one `DATA` packet for the `.`

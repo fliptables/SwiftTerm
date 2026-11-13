@@ -63,12 +63,23 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
         onEnd(exitCode)
     }
     
+    /// Observes every batch of child output, in order.
+    ///
+    /// Called after the batch is fed to ``terminal``, on the feeding thread,
+    /// while `terminal.terminalLock` is still held, so the observer sees the
+    /// batch and the terminal state it produced as one step: a snapshot taken
+    /// under the same lock is never between the two. Keep it short and never
+    /// block in it (no network write, no wait): append to a ring and return.
+    /// Set it before the process starts, or under `terminal.terminalLock`.
+    public var onOutput: ((ArraySlice<UInt8>) -> Void)?
+
     public func dataReceived(slice: ArraySlice<UInt8>) {
         //print (String (bytes: slice, encoding: .utf8))
         callbackLock.lock()
         defer { callbackLock.unlock() }
         terminal.terminalLock.withLock {
             terminal.feed(buffer: slice)
+            onOutput?(slice)
         }
     }
 
