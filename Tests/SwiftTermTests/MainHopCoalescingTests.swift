@@ -5,8 +5,12 @@
 //  IT-1075: DEC 2026 synchronized-output ends and OSC title changes arrive once
 //  per TUI frame. Each used to enqueue its own main-queue block (~140 000/s
 //  from one busy terminal), which flooded main with a dozen agent terminals.
-//  They now ride TerminalEventQueue: at most one main block outstanding per
-//  terminal, carrying the latest state.
+//
+//  IT-2001 D2: both now use upstream's mechanism (a329fc7). The parse thread
+//  records the latest value in the view's cross-thread state and requests a
+//  view update; the frame driver applies it once, at its next tick
+//  (`applyPendingViewUpdates`). Neither posts to TerminalEventQueue. These
+//  tests call `applyPendingViewUpdates` directly as the tick.
 //
 
 import Foundation
@@ -44,6 +48,13 @@ struct MainHopCoalescingTests {
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     }
 
+    /// Hands a main-actor object to a background thread for a call that is
+    /// `nonisolated` (the terminal delegate methods the parse thread calls).
+    private final class Unchecked<T>: @unchecked Sendable {
+        let value: T
+        init(_ value: T) { self.value = value }
+    }
+
     /// Runs `body` on a fresh thread and blocks the caller (main) until it
     /// finishes, so main cannot service the queue during the burst.
     private static func runOnThreadBlocking(_ body: @escaping @Sendable () -> Void) {
@@ -64,97 +75,90 @@ struct MainHopCoalescingTests {
             view.feed(text: "line \(i)\r\n")
         }
         view.eventQueue.drain()
+        view.applyPendingViewUpdates()
         delegate.scrolled.removeAll()
         delegate.titles.removeAll()
         view.eventQueue.resetCounters()
         return view
     }
 
-    /// The headline: a burst of K frames (2K sync toggles + K titles) enqueues
-    /// at most one main block, and draining it leaves the final state applied.
-    /// Main is not serviced during the burst, which is the busy-main scenario.
+    /// The headline: N frames (N sync-ends and N titles) between two frame
+    /// ticks give one `scrolled` and one `setTerminalTitle`, each with the last
+    /// value, and post nothing to the event queue.
     @MainActor
-    @Test func burstOfSyncFramesYieldsOneMainHopAndFinalState() {
+    @Test func burstOfSyncFramesBetweenTwoTicksDeliversOnceWithFinalState() {
         let delegate = RecordingDelegate()
         let view = makeView(delegate)
         let k = 500
 
         view.feed(text: Self.frames(k))
 
-        // Parsing holds the terminal lock, so nothing is delivered inline.
-        #expect(view.eventQueue.posts == 2 * k)
-        #expect(view.eventQueue.scheduledHops <= 1)
-        // The public diagnostics surface the coalesced hops (they no longer
-        // pass through onMain, so `mainHops` alone would read zero).
-        #expect(view.diagnostics.coalescedMainHops == view.eventQueue.scheduledHops)
+        #expect(view.eventQueue.posts == 0)
         #expect(delegate.scrolled.isEmpty)
         #expect(delegate.titles.isEmpty)
 
-        // Discard feed-time frame requests so the drain's own request is seen.
-        _ = view.frameSignal.takePendingDirtyForTesting()
-        view.eventQueue.drain()
+        view.applyPendingViewUpdates()
 
-        #expect(view.eventQueue.drains == 1)
         #expect(!view.withTerminal { $0.synchronizedOutputActive })
         #expect(delegate.scrolled == [view.scrollPosition])
         #expect(delegate.titles == ["spin \(k - 1)"])
-        // No missed final render: the drain requested a frame after the last end.
-        #expect(view.frameSignal.takePendingDirtyForTesting())
+
+        // A second tick with nothing new delivers nothing.
+        view.applyPendingViewUpdates()
+        #expect(delegate.scrolled.count == 1)
+        #expect(delegate.titles.count == 1)
     }
 
-    /// Frames that arrive after a drain has started must schedule a new hop:
-    /// the flag is cleared under the same lock that snapshots the state, so a
-    /// late sync-end or title is never stranded.
+    /// Frames after a tick are delivered at the next tick, with their latest
+    /// values: nothing recorded after a tick is stranded.
     @MainActor
-    @Test func postsAfterDrainScheduleAnotherHopWithLatestState() {
+    @Test func framesAfterATickAreDeliveredAtTheNextTick() {
         let delegate = RecordingDelegate()
         let view = makeView(delegate)
 
         view.feed(text: Self.frames(10))
-        view.eventQueue.drain()
+        view.applyPendingViewUpdates()
         #expect(delegate.titles == ["spin 9"])
 
         view.feed(text: "\(Self.esc)[?2026h\(Self.esc)]0;final\u{7}more\r\n\(Self.esc)[?2026l")
-        #expect(view.eventQueue.scheduledHops == 2)
-        view.eventQueue.drain()
+        view.applyPendingViewUpdates()
 
         #expect(delegate.titles == ["spin 9", "final"])
         #expect(delegate.scrolled.count == 2)
         #expect(delegate.scrolled.last == view.scrollPosition)
         #expect(!view.withTerminal { $0.synchronizedOutputActive })
+        #expect(view.eventQueue.posts == 0)
     }
 
-    /// An unmatched `?2026h` at the end of a burst leaves sync active and
-    /// posts nothing for it; the flag lives in the terminal, not in the hop.
+    /// An unmatched `?2026h` at the end of a burst leaves sync active; the
+    /// flag lives in the terminal, not in the recorded update.
     @MainActor
     @Test func trailingSyncBeginStaysActiveUntilItsEnd() {
         let delegate = RecordingDelegate()
         let view = makeView(delegate)
 
         view.feed(text: Self.frames(5) + "\(Self.esc)[?2026h")
-        view.eventQueue.drain()
+        view.applyPendingViewUpdates()
         #expect(view.withTerminal { $0.synchronizedOutputActive })
         #expect(delegate.scrolled.count == 1)
 
         view.feed(text: "\(Self.esc)[?2026l")
-        view.eventQueue.drain()
+        view.applyPendingViewUpdates()
         #expect(!view.withTerminal { $0.synchronizedOutputActive })
         #expect(delegate.scrolled.count == 2)
     }
 
-    /// A sync-end followed by an alternate-screen switch in the same drain
-    /// window: one hop, one `scrolled`, and the view ends on the alternate
-    /// buffer with sync inactive. The reported position is the one captured
-    /// at the sync end (as before IT-1075); the scroller itself reads live
-    /// state in `updateScroller`.
+    /// A sync-end followed by an alternate-screen switch between two ticks:
+    /// one `scrolled`, one title, and the view ends on the alternate buffer
+    /// with sync inactive.
     @MainActor
-    @Test func syncEndThenBufferSwitchInOneWindowDeliversOnce() {
+    @Test func syncEndThenBufferSwitchBetweenTwoTicksDeliversOnce() {
         let delegate = RecordingDelegate()
         let view = makeView(delegate)
 
         view.feed(text: Self.frames(3) + "\(Self.esc)[?1049h")
-        #expect(view.eventQueue.scheduledHops == 1)
         view.eventQueue.drain()
+        view.applyPendingViewUpdates()
 
         #expect(view.withTerminal { $0.isCurrentBufferAlternate })
         #expect(!view.withTerminal { $0.synchronizedOutputActive })
@@ -162,52 +166,41 @@ struct MainHopCoalescingTests {
         #expect(delegate.titles == ["spin 2"])
     }
 
-    /// Real delivery path: posts from a background thread while main is
-    /// blocked collapse to one block, which the run loop then delivers.
+    /// Titles set from a background thread while main is blocked: one
+    /// delegate call at the next tick, with the last title, and no
+    /// event-queue post.
     @MainActor
-    @Test func backgroundBurstDeliversOnceThroughMainQueue() async throws {
+    @Test func backgroundTitleBurstDeliversTheLastTitleAtTheNextTick() {
         let delegate = RecordingDelegate()
         let view = makeView(delegate)
-        let queue = view.eventQueue
+        let box = Unchecked((view, view.terminal!))
 
         Self.runOnThreadBlocking {
+            let (view, terminal) = box.value
             for i in 0..<10_000 {
-                queue.postSynchronizedOutputEnded(scrollPosition: Double(i) / 10_000)
-                queue.postTitle("t\(i)")
+                view.setTerminalTitle(source: terminal, title: "t\(i)")
             }
         }
 
-        #expect(queue.posts == 20_000)
-        #expect(queue.scheduledHops == 1)
-
-        // Yield main so the queued block runs (a RunLoop spin inside this
-        // main-queue test body would not drain the main queue).
-        try await Task.sleep(nanoseconds: 200_000_000)
-
-        // (`drains` may also count an empty block left over from makeView's
-        // setup feed; what matters is one hop for the burst and one delivery.)
-        #expect(queue.scheduledHops == 1)
-        #expect(delegate.scrolled == [9_999.0 / 10_000])
+        #expect(view.eventQueue.posts == 0)
+        #expect(delegate.titles.isEmpty)
+        view.applyPendingViewUpdates()
         #expect(delegate.titles == ["t9999"])
     }
 
-    /// Nothing is delivered to the delegate after the view is gone: the queued
-    /// block holds the queue weakly and the queue's sink holds the view weakly.
+    /// Nothing is delivered to the delegate after the view is gone.
     @MainActor
     @Test func nothingDeliveredAfterViewTeardown() async throws {
         let delegate = RecordingDelegate()
         weak var weakView: TerminalView?
-        weak var weakQueue: TerminalEventQueue?
         autoreleasepool {
             let view = makeView(delegate)
-            let queue = view.eventQueue
+            let box = Unchecked((view, view.terminal!))
             Self.runOnThreadBlocking {
-                queue.postSynchronizedOutputEnded(scrollPosition: 0.5)
-                queue.postTitle("late")
+                let (view, terminal) = box.value
+                view.setTerminalTitle(source: terminal, title: "late")
             }
-            #expect(queue.scheduledHops == 1)
             weakView = view
-            weakQueue = queue
         }
 
         try await Task.sleep(nanoseconds: 200_000_000)
@@ -216,7 +209,6 @@ struct MainHopCoalescingTests {
         #expect(delegate.titles.isEmpty)
         // If the view outlived the pool, the assertions above prove nothing.
         #expect(weakView == nil)
-        #expect(weakQueue == nil)
     }
 }
 #endif
