@@ -953,6 +953,14 @@ final class EscapeSequenceParser {
                 // abandons any open one.
                 sequenceStart = i
                 sequenceSkips.removeAll(keepingCapacity: true)
+            case .oscEnd where nextState == ParserState.programStatusEscape.rawValue:
+                // An OSC 7501 body ended by ESC: the parser holds the body
+                // and waits for the ST's `\`, so the ESC continues the open
+                // sequence. (A byte other than `\` then drops the body in a
+                // transition that consumes nothing, and the same byte runs
+                // again from escape; replaying from the OSC's start does the
+                // same.)
+                break
             case .oscEnd, .dcsUnhook:
                 // A string ended by ESC: the ESC opens the next sequence.
                 sequenceStart = i
