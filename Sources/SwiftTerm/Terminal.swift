@@ -639,7 +639,10 @@ open class Terminal {
 #endif
         }
     }
-    private var synchronizedOutputTimeoutDisabled = false
+    private var synchronizedOutputTimeoutDisabled: Bool {
+        get { cold.synchronizedOutputTimeoutDisabled }
+        set { cold.synchronizedOutputTimeoutDisabled = newValue }
+    }
 
     /// Opens the DEC 2026 valve now, as the safety timer would: ends synchronized output if it
     /// is active. A replica applies the owner's "the valve opened" event with this, at the same
@@ -891,7 +894,10 @@ open class Terminal {
     /// replica fed the same bytes as the terminal that owns the child sets
     /// this to `false`, so exactly one emulator answers. User input
     /// (`sendUserInput`, paste, clicks, focus reports) is not affected.
-    public var respondsToQueries: Bool = true
+    public var respondsToQueries: Bool {
+        get { cold.respondsToQueries }
+        set { cold.respondsToQueries = newValue }
+    }
 
     /// The one sink for a response this terminal generates from its input.
     @inline(__always)
@@ -3994,6 +4000,12 @@ open class Terminal {
         var foregroundOverride: (host: Color, osc: Color)? = nil
         /// As `foregroundOverride`, for OSC 11 and OSC 111.
         var backgroundOverride: (host: Color, osc: Color)? = nil
+        /// Fork state (IT-2001 D3): kept here, not as stored properties of
+        /// `Terminal`, so the hot fields keep their offsets.
+        /// Backs ``Terminal/respondsToQueries``.
+        var respondsToQueries = true
+        /// Backs ``Terminal/synchronizedOutputTimeout``: `true` when it is `nil`.
+        var synchronizedOutputTimeoutDisabled = false
     }
 
     // As `reportedOnly`, this is after the hot fields. Internal, so that
@@ -10878,9 +10890,18 @@ public extension TerminalDelegate {
 // The only surface of `Terminal` that the replication files
 // (`TerminalStateSnapshot.swift`, `TerminalStateSnapshotCoding.swift`,
 // `TerminalHistoryStreaming.swift`, `TerminalReplicationDigest.swift`) use,
-// besides public API. Each member forwards to one stored property or method
-// and adds no logic, so the private state keeps its upstream access level and
+// besides public API. The private state keeps its upstream access level, and
 // an upstream change to that state shows up here, in one block, at a merge.
+// Each member forwards to one stored property or method and adds no logic,
+// except these five:
+// - `replicationActiveHyperlinkTarget(missingTarget:)` and `replicationSetActiveHyperlink(_:)`
+//   map the private `ActiveHyperlink` enum to and from `String??` (nil: none;
+//   `.some(nil)`: unavailable; `.some(target)`: pending or resolved);
+// - `replicationKeyboardModeNormal` and `replicationKeyboardModeAlt` convert
+//   the private `KeyboardModeState` to and from a `(flags:, stack:)` tuple;
+// - `replicationNotifyBufferActivated()` calls the delegate
+//   (`tdel?.bufferActivated`): a notification to the host, no bytes toward
+//   the child. It is the only `tdel` use the D3 source scan allows.
 // Call every one of them under `terminalLock`, between feeds.
 extension Terminal {
     // Grid and buffers
@@ -10962,11 +10983,14 @@ extension Terminal {
     /// atom could not be made); `.some(target)` open, whether or not its atom
     /// was made yet. Setting an open target leaves it to be resolved on the
     /// next print, as an OSC 8 does.
-    var replicationActiveHyperlinkTarget: String?? {
+    /// `missingTarget` stands in for a resolved atom whose target is not a
+    /// `String` (reachable only if a host releases the atom's code through
+    /// public `TinyAtom` API): the snapshot passes `""`, the digest `"?"`.
+    func replicationActiveHyperlinkTarget(missingTarget: String) -> String?? {
         switch activeHyperlink {
         case nil: return nil
         case .pending(let payload): return .some(payload)
-        case .resolved(let atom): return .some(atom.target as? String ?? "")
+        case .resolved(let atom): return .some(atom.target as? String ?? missingTarget)
         case .unavailable: return .some(nil)
         }
     }

@@ -318,7 +318,7 @@ extension Terminal {
     }
 
     private func activeHyperlinkImage() -> HyperlinkImage {
-        switch replicationActiveHyperlinkTarget {
+        switch replicationActiveHyperlinkTarget(missingTarget: "") {
         case nil: return .none
         case .some(.some(let target)): return .open(target)
         case .some(nil): return .unavailable

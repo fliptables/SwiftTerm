@@ -16,7 +16,6 @@ extension Terminal {
     @_spi(Replication)
     public static let digestExcludedTerminalProperties: [String: String] = [
         "MINIMUM_COLS": "constant",
-        "respondsToQueries": "the replica's role, not emulator state",
         "MINIMUM_ROWS": "constant",
         "terminalLock": "synchronisation",
         "selections": "view selection",
@@ -29,7 +28,6 @@ extension Terminal {
         "synchronizedOutputWatchdogDirty": "watchdog bookkeeping",
         "synchronizedOutputTimeoutItem": "watchdog timer",
         "synchronizedOutputWatchdogCounters": "watchdog diagnostics",
-        "synchronizedOutputTimeoutDisabled": "the host's choice of valve, not emulator state",
         "synchronizedOutputTimeoutSeconds": "the host's choice of valve, not emulator state",
         "tdel": "delegate",
         "curStyleID": "storage identity of curAttr",
@@ -120,7 +118,9 @@ extension Terminal {
     }
 
     private func describeActiveHyperlink() -> String {
-        switch replicationActiveHyperlinkTarget {
+        // A resolved atom with no String target prints as `open(?)`, as before
+        // IT-2001 PR A; the snapshot exports `""` for it.
+        switch replicationActiveHyperlinkTarget(missingTarget: "?") {
         case nil: return "none"
         case .some(.some(let target)): return "open(\(target))"
         case .some(nil): return "unavailable"
