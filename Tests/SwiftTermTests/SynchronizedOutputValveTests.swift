@@ -74,6 +74,41 @@ final class SynchronizedOutputValveTests {
         #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 1)
     }
 
+    // Pin 7: the decision "request a timer, cancel, or nothing" is one pure
+    // function of (active, timeout is nil, armed), used by all three branches.
+    @Test func theWatchdogDecisionTable() {
+        typealias T = Terminal
+        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: false, armed: false) == .requestTimer)
+        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: false, armed: true) == .requestTimer)
+        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: true, armed: false) == .nothing)
+        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: true, armed: true) == .cancel)
+        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: false, armed: false) == .nothing)
+        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: false, armed: true) == .cancel)
+        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: true, armed: false) == .nothing)
+        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: true, armed: true) == .cancel)
+    }
+
+    // Pin 6, the narrowed Embedded guarantee, through the decision's seam:
+    // the host-timer branch requests on `decision(...) == .requestTimer` with
+    // `armed: false` (source pin below). Across windows and re-entry into
+    // DEC 2026, one request is recorded per window while a value is set and
+    // none after nil.
+    @Test func theHostTimerIsRequestedOnlyWhileAValueIsSet() {
+        var requests = 0
+        func window(timeoutIsNil: Bool) {
+            for active in [true, true, false] where Terminal.synchronizedOutputWatchdogDecision(
+                active: active, timeoutIsNil: timeoutIsNil, armed: false) == .requestTimer {
+                requests += 1
+            }
+        }
+        window(timeoutIsNil: false)
+        #expect(requests == 2)
+        requests = 0
+        window(timeoutIsNil: true)
+        window(timeoutIsNil: true)
+        #expect(requests == 0)
+    }
+
     // Pin 6, the stated consequence (not a rejection): with nil and the mode
     // open, a public expiry (a late host timer or the ordered valve: the same
     // call) ends the mode and returns true.

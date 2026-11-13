@@ -101,8 +101,15 @@ public protocol TerminalDelegate: AnyObject {
     /// The default implementation does nothing.
     func synchronizedOutputChanged (source: Terminal, active: Bool)
 
+    /// Embedded builds only: run a timer that calls `source.expireSynchronizedOutput()`
+    /// (under the terminal's lock) after `afterMilliseconds`, a fixed 1 s. It is not
+    /// requested while ``Terminal/synchronizedOutputTimeout`` is `nil`; SwiftTerm cannot
+    /// withdraw an earlier request, so a host that sets `nil` must drop its own pending
+    /// timer: a late call to `expireSynchronizedOutput()` is indistinguishable from the
+    /// host's ordered valve and is applied as one.
+    /// The default implementation does nothing.
     func scheduleSynchronizedOutputTimeout (source: Terminal, afterMilliseconds: UInt32)
-    
+
     /// Should raise the bell
     /// The default implementation does nothing.
     func bell (source: Terminal)
@@ -625,18 +632,36 @@ open class Terminal {
     /// valve that unfreezes a display an application left frozen. `nil` never arms it: a
     /// replica sets that, because the terminal that owns the child decides when the valve
     /// opens and sends it as an ordered event (``expireSynchronizedOutput()``); a test sets it
-    /// so no comparison depends on wall-clock time.
+    /// so no comparison depends on wall-clock time. Set it under `terminalLock`.
+    ///
+    /// With `nil`, DEC 2026 ends only by the application's reset or by a call to
+    /// ``expireSynchronizedOutput()``; a view shows the held frame until then. Setting
+    /// `nil` cancels an armed timer, and a timer callback already in flight changes
+    /// nothing. Setting a value while a synchronized update is open arms the valve.
+    ///
+    /// On a view-backed terminal a change reaches the view's timer at that view's next
+    /// feed transaction: set it before the terminal is fed, and do not change it while a
+    /// synchronized update is open. (Until that feed the view has no valve; and where a
+    /// plain `Terminal` re-arms with a fresh deadline, a view whose timer was still
+    /// armed keeps its original deadline.)
+    ///
+    /// In an Embedded build the value is not used: only `nil` versus non-`nil` matters,
+    /// and the host is asked for a fixed 1 s timer (``TerminalDelegate/scheduleSynchronizedOutputTimeout(source:afterMilliseconds:)``).
+    /// There SwiftTerm guarantees only that no timer is requested while this is `nil`;
+    /// it cannot withdraw a request made earlier. A host that sets `nil` must drop its
+    /// own pending timer: a late call to ``expireSynchronizedOutput()`` is the host's
+    /// ordered valve, and is applied as one.
     public var synchronizedOutputTimeout: TimeInterval? {
         get { synchronizedOutputTimeoutDisabled ? nil : synchronizedOutputTimeoutSeconds }
         set {
             synchronizedOutputTimeoutDisabled = newValue == nil
             if let newValue { synchronizedOutputTimeoutSeconds = newValue }
-#if !SWIFTTERM_EMBEDDED
-            if synchronizedOutputTimeoutDisabled, let synchronizedOutputTimeoutItem {
-                synchronizedOutputTimeoutItem.cancel()
-                self.synchronizedOutputTimeoutItem = nil
+            // IT-2001 D7: every watchdog learns the change (P1 decision 2). The
+            // gate in reconcile cancels on nil and arms on a value in an open window.
+            synchronizedOutputWatchdogDirty = true
+            if parseDepth == 0 {
+                reconcileSynchronizedOutputWatchdog()
             }
-#endif
         }
     }
     private var synchronizedOutputTimeoutDisabled: Bool {
@@ -9232,30 +9257,67 @@ open class Terminal {
         }
     }
 
-    func reconcileSynchronizedOutputWatchdog () {
+    /// What a watchdog does with one update (IT-2001 D7, proof P1).
+    enum SynchronizedOutputWatchdogDecision: Equatable {
+        /// Arm a timer for the open window, or rearm the outstanding one.
+        case requestTimer
+        /// Cancel the outstanding timer.
+        case cancel
+        /// Leave everything as it is.
+        case nothing
+    }
+
+    /// The one decision behind every watchdog branch (the normal build's own
+    /// timer, the Embedded host timer, and the view's watchdog through
+    /// ``reconcileSynchronizedOutputWatchdog()``): a timer only for an open
+    /// window while the timeout is not `nil`; otherwise cancel one that is
+    /// armed. `armed` says whether the deciding branch has a timer outstanding.
+    static func synchronizedOutputWatchdogDecision(
+        active: Bool, timeoutIsNil: Bool, armed: Bool) -> SynchronizedOutputWatchdogDecision
+    {
+        if active && !timeoutIsNil { return .requestTimer }
+        return armed ? .cancel : .nothing
+    }
+
+    /// The only caller of ``applySynchronizedOutputWatchdog(active:generation:)``,
+    /// and the gate (IT-2001 D7): with the timeout `nil` every receiver is told
+    /// "not active", so none arms. `synchronizedOutputActive`, which the views
+    /// read to hold their display, is untouched. `final`: an override would
+    /// bypass the gate.
+    final func reconcileSynchronizedOutputWatchdog () {
         guard synchronizedOutputWatchdogDirty else { return }
         synchronizedOutputWatchdogDirty = false
-        applySynchronizedOutputWatchdog(
+        let decision = Terminal.synchronizedOutputWatchdogDecision(
             active: synchronizedOutputActive,
+            timeoutIsNil: synchronizedOutputTimeoutDisabled,
+            armed: false)
+        applySynchronizedOutputWatchdog(
+            active: decision == .requestTimer,
             generation: synchronizedOutputGeneration)
     }
 
     func applySynchronizedOutputWatchdog(active: Bool, generation: UInt64) {
 #if SWIFTTERM_EMBEDDED
-        if active {
+        // The host's timer: requested only on the decision's result. Nothing
+        // here can withdraw an earlier request (see `synchronizedOutputTimeout`).
+        if Terminal.synchronizedOutputWatchdogDecision(active: active, timeoutIsNil: synchronizedOutputTimeoutDisabled, armed: false) == .requestTimer {
             tdel?.scheduleSynchronizedOutputTimeout(source: self, afterMilliseconds: 1_000)
         }
 #else
-        guard active else {
-            if let synchronizedOutputTimeoutItem {
-                synchronizedOutputTimeoutItem.cancel()
-                self.synchronizedOutputTimeoutItem = nil
-                synchronizedOutputWatchdogCounters.cancelled += 1
-            }
+        switch Terminal.synchronizedOutputWatchdogDecision(
+            active: active,
+            timeoutIsNil: synchronizedOutputTimeoutDisabled,
+            armed: synchronizedOutputTimeoutItem != nil) {
+        case .cancel:
+            synchronizedOutputTimeoutItem?.cancel()
+            synchronizedOutputTimeoutItem = nil
+            synchronizedOutputWatchdogCounters.cancelled += 1
             return
+        case .nothing:
+            return
+        case .requestTimer:
+            break
         }
-
-        guard !synchronizedOutputTimeoutDisabled else { return }
         if synchronizedOutputTimeoutItem == nil {
             synchronizedOutputWatchdogCounters.armed += 1
         } else {
@@ -9320,9 +9382,14 @@ open class Terminal {
     }
 #endif
 #if !SWIFTTERM_EMBEDDED
+    /// Where the terminal's own timer and the view's watchdog end. A callback
+    /// already in flight when the timeout becomes `nil` changes nothing
+    /// (IT-2001 D7, P1 decision 3); the public ``expireSynchronizedOutput()``
+    /// is the valve then.
     func synchronizedOutputWatchdogFired(generation: UInt64) {
         terminalLock.withLock {
             guard synchronizedOutputActive,
+                  !synchronizedOutputTimeoutDisabled,
                   generation == synchronizedOutputGeneration
             else {
                 return
