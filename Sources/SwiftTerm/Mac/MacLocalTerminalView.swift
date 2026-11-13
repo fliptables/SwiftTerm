@@ -5,6 +5,7 @@
 //  Created by Miguel de Icaza on 3/6/20.
 //
 
+#if !SWIFTTERM_EMBEDDED
 #if os(macOS)
 import Foundation
 import AppKit
@@ -48,6 +49,12 @@ public protocol LocalProcessTerminalViewDelegate: AnyObject {
      */
     func processTerminated (source: TerminalView, exitCode: Int32?)
 
+    /// Reports a launch failure, separate from child exit.
+    func processFailedToStart(source: TerminalView, error: LocalProcessError)
+
+    /// Receives the current OSC 7501 records on the main actor.
+    func programStatusChanged(source: TerminalView, records: [TerminalProgramStatus])
+
     // MARK: Kitty clipboard protocol, OSC 5522
     //
     // ``LocalProcessTerminalView`` is its own ``TerminalViewDelegate``, so the
@@ -90,6 +97,9 @@ public protocol LocalProcessTerminalViewDelegate: AnyObject {
 }
 
 public extension LocalProcessTerminalViewDelegate {
+    func programStatusChanged(source: TerminalView, records: [TerminalProgramStatus]) {}
+    func processFailedToStart(source: TerminalView, error: LocalProcessError) {}
+
     func kittyClipboardCapabilities(source: TerminalView) -> KittyClipboardCapabilities {
         []
     }
@@ -134,17 +144,20 @@ private final class LocalProcessTerminalViewProcessAdapter:
     private let outputHandler: LockedVoidCallback
     private let windowSize = Locked(winsize())
     private let inputProcess = Locked(WeakLocalProcessInputReference())
+    private let failureHandler: @MainActor @Sendable (LocalProcessError) -> Void
     private let terminationHandler: @MainActor @Sendable (Int32?) -> Void
 
     init(renderOwner: TerminalRenderOwner,
          frameSignal: FrameDriverSignal,
          diagnosticsState: Locked<TerminalView.Diagnostics>,
          outputHandler: LockedVoidCallback,
+         failureHandler: @escaping @MainActor @Sendable (LocalProcessError) -> Void,
          terminationHandler: @escaping @MainActor @Sendable (Int32?) -> Void) {
         self.renderOwner = renderOwner
         self.frameSignal = frameSignal
         self.diagnosticsState = diagnosticsState
         self.outputHandler = outputHandler
+        self.failureHandler = failureHandler
         self.terminationHandler = terminationHandler
     }
 
@@ -160,6 +173,11 @@ private final class LocalProcessTerminalViewProcessAdapter:
         inputProcess.withLock { reference in
             reference.value?.send(data: bytes[...])
         }
+    }
+
+    func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
+        let handler = failureHandler
+        Task { @MainActor in handler(error) }
     }
 
     func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
@@ -252,11 +270,16 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     func setup ()
     {
         terminalDelegate = self
+        resolvesLinksAgainstShellDirectory = true
         let adapter = LocalProcessTerminalViewProcessAdapter(
             renderOwner: renderOwner,
             frameSignal: frameSignal,
             diagnosticsState: diagnosticsState,
             outputHandler: processOutputHandler,
+            failureHandler: { [weak self] error in
+                guard let self, let process = self.process else { return }
+                self.processFailedToStart(process, error: error)
+            },
             terminationHandler: { [weak self] exitCode in
                 guard let self, let process = self.process else { return }
                 self.processTerminated(process, exitCode: exitCode)
@@ -295,20 +318,40 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
         }
     }
 
+    open override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            syncProcessWindowSizeIfNeeded()
+        }
+    }
+
+    open override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if window != nil {
+            syncProcessWindowSizeIfNeeded()
+        }
+    }
+
+    /// A backing scale change can alter the pixel size without changing the
+    /// terminal's rows or columns. Keep the PTY size current in that case too.
+    private func syncProcessWindowSizeIfNeeded() {
+        guard let processAdapter, let process else { return }
+        var size = getWindowSize()
+        let previous = processAdapter.getWindowSize()
+        guard size.ws_row != previous.ws_row || size.ws_col != previous.ws_col ||
+              size.ws_xpixel != previous.ws_xpixel || size.ws_ypixel != previous.ws_ypixel else {
+            return
+        }
+        processAdapter.updateWindowSize(size)
+        _ = process.updateWindowSize(&size)
+    }
+
     /**
      * This method is invoked to notify the client of the new columsn and rows that have been set by the UI
      */
     public func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        // Scape fork: guard against degenerate sizes (e.g. SwiftUI setting frame
-        // to 0x0 during NSViewRepresentable insertion). Sending TIOCSWINSZ with
-        // rows=1/cols=2 corrupts the shell's readline during initialization,
-        // breaking Tab completion.
-        guard newCols >= 2, newRows >= 1 else {
-            return
-        }
-        var size = getWindowSize()
-        processAdapter.updateWindowSize(size)
-        guard process.updateWindowSize(&size) else { return }
+        // IT-2001: D6. Upstream's sync; the fork's degenerate-size guard moves inside it.
+        syncProcessWindowSizeIfNeeded()
         
         processDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
     }
@@ -379,11 +422,25 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     }
 
     /**
-     * Invoked when the user activates a link, override to handle the link yourself
+     * Invoked when the user activates a link. Override to handle the link yourself.
+     *
+     * `request.link` is untrusted terminal output. Call `request.openDefault(_:)`
+     * to check it with SwiftTerm's policy and open it. The default implementation
+     * checks the link and calls ``requestOpenLink(source:link:params:)`` with
+     * the approved URL.
      */
+    open func requestOpenLink (source: TerminalView, request: TerminalLinkRequest)
+    {
+        source.requestOpenLinkWithCheckedURL(request, delegate: self)
+    }
+
+    /**
+     * Invoked with a checked link from ``requestOpenLink(source:request:)``.
+     */
+    @available(*, deprecated, message: "Override requestOpenLink(source:request:)")
     open func requestOpenLink (source: TerminalView, link: String, params: [String:String])
     {
-        openLink (link)
+        source.openLinkFromDelegate(link)
     }
 
     /**
@@ -439,13 +496,24 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
     /**
      * Implements the LocalProcessDelegate method.
      */
+    open func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
+        feed(text: "\r\nProcess launch failed: \(error)\r\n")
+        processDelegate?.processFailedToStart(source: self, error: error)
+    }
+
     open func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        programStatusProcessExited()
         processDelegate?.processTerminated(source: self, exitCode: exitCode)
     }
+
+    open func programStatusChanged(source: TerminalView, records: [TerminalProgramStatus]) {
+        processDelegate?.programStatusChanged(source: source, records: records)
+    }
     
-    /**
-     * Implements the LocalProcessDelegate.dataReceived method
-     */
+    /// Left over from SwiftTerm 1.0, when this view was the process delegate.
+    /// Output is now parsed on the I/O thread without calling this method, so
+    /// it is unavailable to make an override a compile error, not a no-op.
+    @available(*, unavailable, message: "LocalProcessTerminalView parses process output on the I/O thread and never calls this method. Use setProcessOutputHandler(_:) to observe output batches, or run your own LocalProcess with a LocalProcessDelegate to handle the bytes.")
     open func dataReceived(slice: ArraySlice<UInt8>) {
         feed (byteArray: slice)
     }
@@ -466,3 +534,5 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
 }
 
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

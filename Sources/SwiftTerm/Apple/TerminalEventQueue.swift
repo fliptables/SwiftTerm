@@ -22,6 +22,8 @@
 //  mailbox does not do.
 //
 
+#if !SWIFTTERM_EMBEDDED
+#if os(macOS) || os(iOS) || os(visionOS)
 import Foundation
 
 /// A notification that can be collapsed: repeated occurrences within one
@@ -39,16 +41,20 @@ enum TerminalEvent: Int, CaseIterable, Sendable {
     case mouseModeChanged = 1
     /// A BEL was received. Collapsing matches the debounce that follows it.
     case bell = 2
+    /// Current program status changed. The view stores the latest snapshot.
+    case programStatusChanged = 3
+    // IT-2001: D2. Upstream's numbering; the fork's two coalesced cases follow it
+    // until D2 deletes `synchronizedOutputEnded` and moves the title.
     /// DEC 2026 synchronized output ended (IT-1075). TUIs such as Claude Code
     /// bracket every frame with `?2026h` / `?2026l`, and each end used to post
     /// its own main-queue block: ~140 000 per second from one busy terminal
     /// fed a tight frame loop. The view only needs the scroller position after
     /// the last frame. The sync flag itself is read from the terminal under its
     /// lock, never carried by this hop, so collapsing cannot strand it "on".
-    case synchronizedOutputEnded = 3
+    case synchronizedOutputEnded = 4
     /// OSC 0/2 window title changed. TUIs animate a spinner in the title, one
     /// update per frame; only the latest title is delivered.
-    case titleChanged = 4
+    case titleChanged = 5
 
     fileprivate var mask: UInt32 { 1 << UInt32(rawValue) }
 }
@@ -219,3 +225,6 @@ final class TerminalEventQueue: Sendable {
         return TerminalEvent.allCases.filter { events & $0.mask != 0 }
     }
 }
+
+#endif
+#endif // !SWIFTTERM_EMBEDDED

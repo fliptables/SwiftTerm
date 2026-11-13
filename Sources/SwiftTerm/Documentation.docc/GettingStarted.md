@@ -8,6 +8,9 @@ SwiftTerm provides terminal emulation for macOS, iOS, and visionOS applications.
 This guide walks through adding the dependency and embedding a terminal view on
 each platform.
 
+For a Foundation-free, headless build targeting Embedded Swift or WASI
+WebAssembly, see <doc:PortableBuilds>.
+
 ## Adding SwiftTerm to Your Project
 
 Add SwiftTerm as a Swift Package Manager dependency. In your `Package.swift`:
@@ -99,7 +102,7 @@ class MyTerminalController: NSViewController, TerminalViewDelegate {
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
-    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+    func requestOpenLink(source: TerminalView, request: TerminalLinkRequest) {}
     func clipboardCopy(source: TerminalView, content: Data) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 }
@@ -109,8 +112,9 @@ The key pattern is:
 - Implement ``TerminalViewDelegate/send(source:data:)`` to forward user input
   to your backend.
 - Call ``TerminalView/feed(byteArray:)`` when data arrives from the backend.
-- Implement ``TerminalViewDelegate/requestOpenLink(source:link:params:)`` to
-  control how link taps/clicks are handled.
+- Implement ``TerminalViewDelegate/requestOpenLink(source:request:)`` to
+  control how link taps/clicks are handled. On macOS, call
+  `request.openDefault()` to check and open the link.
 
 ## iOS: Embedding a Terminal
 
@@ -141,7 +145,7 @@ class TerminalViewController: UIViewController, TerminalViewDelegate {
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
     func scrolled(source: TerminalView, position: Double) {}
-    func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+    func requestOpenLink(source: TerminalView, request: TerminalLinkRequest) {}
     func clipboardCopy(source: TerminalView, content: Data) {}
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 }
@@ -175,6 +179,10 @@ print(String(data: output, encoding: .utf8) ?? "")
 See <doc:HeadlessUsage> for more detail.
 
 ## Platform Availability
+
+Embedded Swift and WASI WebAssembly use the portable headless core rather than
+the view and local-process APIs listed below. See <doc:PortableBuilds> for the
+required package traits and build settings.
 
 | Feature | macOS 13+ | iOS 13+ | visionOS 1+ | Linux | Windows |
 |---------|-----------|---------|-------------|-------|---------|

@@ -1,5 +1,15 @@
 {
+  "originHash" : "8592a31a5bbd5ea663a31798b56abcd08b77987cde6b4ed08941fc55a016f60d",
   "pins" : [
+    {
+      "identity" : "h",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/rarestype/h",
+      "state" : {
+        "revision" : "aa3626829160917d4378330617971977cbd78f5b",
+        "version" : "1.0.1"
+      }
+    },
     {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",
@@ -68,8 +78,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
       "state" : {
-        "revision" : "4a9a97111099376854a7f8f0f9f88b9d61f52eff",
-        "version" : "2.92.2"
+        "revision" : "2f58d8ef84438d6517fc78bcea2f8527e3c72936",
+        "version" : "2.105.0"
       }
     },
     {
@@ -82,6 +92,15 @@
       }
     },
     {
+      "identity" : "swift-png",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/tayloraswift/swift-png",
+      "state" : {
+        "revision" : "8a0bcd4df5e4b307c804937776a56dd6ecdf6396",
+        "version" : "4.5.1"
+      }
+    },
+    {
       "identity" : "swift-system",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system",
@@ -91,5 +110,5 @@
       }
     }
   ],
-  "version" : 2
+  "version" : 3
 }

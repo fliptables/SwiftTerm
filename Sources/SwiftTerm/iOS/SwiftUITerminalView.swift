@@ -1,3 +1,4 @@
+#if !SWIFTTERM_EMBEDDED
 #if canImport(UIKit) && DEBUG
 import SwiftUI
 
@@ -77,7 +78,7 @@ private struct TerminalViewContainer: UIViewRepresentable {
         public func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         public func send(source: TerminalView, data: ArraySlice<UInt8>) {}
         public func scrolled(source: TerminalView, position: Double) {}
-        public func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {}
+        public func requestOpenLink(source: TerminalView, request: TerminalLinkRequest) {}
         public func bell(source: TerminalView) {}
         public func clipboardCopy(source: TerminalView, content: Data) {}
         public func clipboardRead(source: TerminalView) -> Data? { return nil }
@@ -128,3 +129,5 @@ struct PreviewTerminal_Previews: PreviewProvider {
     }
 }
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

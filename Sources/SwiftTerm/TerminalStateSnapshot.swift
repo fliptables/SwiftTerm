@@ -349,8 +349,10 @@ extension Terminal {
             savedX: buffer.savedX, savedY: buffer.savedY,
             savedOriginMode: buffer.replicationSavedOriginMode,
             savedMarginMode: buffer.replicationSavedMarginMode,
-            savedWraparound: buffer.replicationSavedWraparound,
-            savedReverseWraparound: buffer.replicationSavedReverseWraparound,
+            // IT-2001 merge repair: no such state upstream; placeholders until format v2
+            // removes the two fields.
+            savedWraparound: false,
+            savedReverseWraparound: false,
             savedAttr: buffer.savedAttr, savedCharset: buffer.savedCharset,
             insertMode: buffer.replicationInsertMode, marginMode: buffer.replicationMarginMode,
             wraparound: buffer.replicationWraparound,
@@ -520,8 +522,8 @@ extension Terminal {
         buffer.savedY = image.savedY
         buffer.replicationSavedOriginMode = image.savedOriginMode
         buffer.replicationSavedMarginMode = image.savedMarginMode
-        buffer.replicationSavedWraparound = image.savedWraparound
-        buffer.replicationSavedReverseWraparound = image.savedReverseWraparound
+        // IT-2001 merge repair: `savedWraparound` / `savedReverseWraparound` have no
+        // state to restore upstream; format v2 removes them.
         buffer.savedAttr = image.savedAttr
         buffer.savedCharset = image.savedCharset
         buffer.replicationSetInsertMode(image.insertMode)
