@@ -1,192 +1,250 @@
 # IT-2001: plan for merging upstream SwiftTerm into `scape-selection-api`
 
-Date: 2026-11-13. Nash said go. This is the plan a builder follows in a fresh worktree; this branch stays docs only. Evidence is in `2026-11-13-it2001-upstream-merge-scoping-findings.md` ("the findings"). Tags: **[M]** measured (source named), **[I]** inferred.
+Date: 2026-11-13. Nash said go. This is the plan a builder follows in a fresh worktree; this branch stays docs only. Evidence is in `2026-11-13-it2001-upstream-merge-scoping-findings.md` ("the findings"). Tags: **[M]** measured (source named), **[I]** inferred. Revision 2 folds in the daemon lead's design read (two P1s, conditions C1 to C6) and the Codex plan review (three P1s, six P2s, two P3s; cited as X1 to X11).
 
-Merge target: upstream `d4f52faaa` into fork `1b21b1bf3` (base `5cb37e865`; 12 conflicted files, 27 hunks). If upstream has moved when the builder starts, the builder still merges `d4f52faaa`; newer commits wait for the next sync.
+Merge target: upstream `d4f52faaa` into fork `1b21b1bf3` (base `5cb37e865`; 12 conflicted files, 27 hunks). If upstream has moved when the builder starts, the builder still merges `d4f52faaa`.
 
 ## 1. Outcome and order
 
-1. **Fork PR A (prep, on today's base, no behaviour change):** delete `TerminalReplayStream.swift`; replace the access widenings with one accessor block per class; the parser hook as one function.
-2. **Fork PR B (the merge, the format revision and the three proofs: one review).**
-3. **Scape pin-bump PR**, after PR B is merged into `scape-selection-api` **as a merge commit**, so the pinned SHA is reachable from that branch. (A squash or rebase leaves the tested SHA unreachable; that was missed once today.)
+1. **Fork PR A (prep, on today's base, no behaviour change):** delete `TerminalReplayStream.swift`; one accessor block per class in place of the access widenings; the parser hook as one function. **May start now.**
+2. **Fork PR B (the merge, the format revision and the proofs: one review).** Its first commit is a true two-parent merge of `d4f52faaa`.
+3. **Scape pin-bump PR**, pinned to PR B's merge commit on `scape-selection-api`.
 4. **Scape PR #1289 (S2.3, the session host) re-gates on the bumped pin.** It does not merge on the old pin.
 5. Nash's hands-on check (section 9).
 
+**The pin is a tested tree.** Nothing else lands on `scape-selection-api` between PR A's merge and PR B's. PR B merges as a **merge commit** (a squash or rebase leaves the tested SHA unreachable from the branch; missed once today). The builder records `git rev-parse <merge-sha>^{tree}` and `git rev-parse <gated-head>^{tree}`, both quoted in the pin-bump PR; if they differ, the fork gate is rerun on the merge commit before the bump.
+
 ## 2. The condition on the session host, and the fallback
 
-Scape PR #1289 ("tether", S2.3, on hold at `46faf0eff`, base `loom-1149-s21`) is already written on `HeadlessTerminal` **[M]** (`gh pr diff 1289`). It merges only after the pin bump.
+Scape PR #1289 ("tether", S2.3, on hold at `46faf0eff`) is written on `HeadlessTerminal` **[M]** (`gh pr diff 1289`). It merges only after the pin bump.
 
-**SwiftTerm API it uses, which PR B must keep with the same shape** (all **[M]** from its diff; "upstream" says what the merge target has):
+**SwiftTerm API it uses, which PR B keeps with the same shape** (**[M]** from its diff):
 
 | API | Note |
 |---|---|
 | `HeadlessTerminal(queue:options:onEnd:)`, `.terminal`, `.process`, `.send(data:)` | upstream adds defaulted `directDelivery:` and `onLaunchFailure:` before `onEnd`; the trailing-closure call still fits **[I]** |
-| `HeadlessTerminal.onOutput` | fork-owned; called after the feed, on the feeding thread, under `terminalLock`. Merged cleanly into the right place. |
-| `LocalProcess.startProcess(executable:args:environment:…)`, `.shellPid`, `.childfd` | unchanged upstream. #1289 duplicates `childfd` for its own resizes. |
-| `PseudoTerminalHelpers.setWinSize(masterPtyDescriptor:windowSize:)` | unchanged |
-| `TerminalOptions(cols:rows:scrollback:)` | unchanged **[I]** |
+| `HeadlessTerminal.onOutput` | fork-owned: after the feed, on the feeding thread, under `terminalLock` |
+| `LocalProcess.startProcess(…)`, `.shellPid`, `.childfd`; `PseudoTerminalHelpers.setWinSize(masterPtyDescriptor:windowSize:)`; `TerminalOptions(cols:rows:scrollback:)` | unchanged upstream |
 | `Terminal.terminalLock`, `.rows`, `.cols`, `.resize(cols:rows:)`, `.feed(byteArray:)`, `.getLine(row:)` | unchanged |
-| `Terminal.synchronizedOutputTimeout` (set to `nil`), `.synchronizedOutputActive` | fork-owned |
-| `Terminal.expireSynchronizedOutput() -> Bool` | #1289 uses the result in a `guard`. Upstream has a `Void` version of the same name. **The `Bool` version is the one kept.** |
+| `Terminal.synchronizedOutputTimeout` (set to `nil`), `.synchronizedOutputActive`, `.expireSynchronizedOutput() -> Bool` | fork-owned. #1289 uses the `Bool` in a `guard`; upstream's `Void` duplicate is removed. **Confirmed by the lead.** |
 | `Terminal.pendingParserBytes` (`nil` = wait), `.respondsToQueries` | fork-owned |
-| `Terminal.exportForStreaming()`, `TerminalStreamingExport.screen.encoded()`, `.historyChunks(linesPerChunk:)`, chunk `.encoded()` | fork-owned; the encoded bytes become format v2 |
-| `TerminalStateSnapshot(encoded:)`, `importState(_:)`, `TerminalHistoryChunk(encoded:)`, `importHistoryChunk(_:) -> Bool` | fork-owned |
+| `exportForStreaming()`, `TerminalStreamingExport.screen.encoded()`, `.historyChunks(linesPerChunk:)`, `TerminalStateSnapshot(encoded:)`, `importState(_:)`, `TerminalHistoryChunk(encoded:)`, `importHistoryChunk(_:) -> Bool` | fork-owned; the bytes become format v2 |
 | `@_spi(Replication) replicationDigest()` | fork-owned; tests only |
 
-Two things the merge changes for #1289, to be handled when it re-gates, not in PR B:
+**#1289's re-gate list gains** (owned by its builder, named here so it is not lost):
 
-- Upstream's `LocalProcess.updateWindowSize(_:)` is `public` (it is internal in the fork) **[M]**. #1289's comment names exactly this as what would let it drop its duplicated descriptor and the one race window it documents. Optional follow-up for the daemon lead.
-- Upstream's `HeadlessTerminal.processTerminated` now changes program-status state under the lock before `onEnd`, and a failed launch is written into the terminal as text through `dataReceived`, so it passes `onOutput` and lands in the ring as ordinary output **[M]**. #1289 treats the termination callback as status only; that still holds.
+- one test that a failed launch arrives as ordinary ring output (upstream writes "Process launch failed" into the terminal through `dataReceived`, so it passes `onOutput`) **[M]**;
+- its exit path makes the one program-status call of section 5, **ordered after the final output entry and before any snapshot taken after the exit** (one test: a snapshot taken after exit shows the exited status and the last output) (X9);
+- **a failed launch cannot leave a session "starting"**: upstream's `processFailedToStart` calls `onLaunchFailure`, or writes diagnostic output, and does not call `onEnd` **[M]** (upstream `HeadlessTerminal.swift`, that function's body), so the host ends the session from its own spawn check (it already throws on `pid <= 0`) or from `onLaunchFailure`; one test (X9);
+- it stays as written on `childfd`. Upstream's `LocalProcess.updateWindowSize(_:)` is `public` (internal in the fork) **[M]**; taking it is **a ticket after #1289 merges**, a separate small PR, whose builder first quotes upstream's body, its lock and queue, and whether the host's thread may call it.
 
-**Fallback checkpoint.** The call is made by Lloyd at whichever comes first:
-
-- the moment #1289 has everything it needs except the pin, or
-- the end of working day 5 of the merge lane.
-
-If at that moment PR B has not passed its own gate (section 8, fork rows), the fallback is option B of the findings: #1289 merges on the old pin, the merge lane continues, and the pin bump lands **before S2.4 starts**. In that case format v2 still lands with the pin bump and #1289's fixtures are regenerated then. Nothing else in this plan changes.
+**Fallback.** Lloyd makes the call at whichever comes first: #1289 has everything it needs except the pin, or the end of working day 5 **counted from the day PR A's builder starts**. If PR B has not passed its gate (section 8) by then: #1289 merges on the old pin, the merge lane continues, the pin bump lands before S2.4 starts, and #1289's fixtures are regenerated with it. **Condition: under the fallback no build containing the session host leaves the building before the pin bump** (otherwise v1 is a shipped format). "Merged" is not "shipped": on developer machines the bump then means a **clean daemon restart**; no v1 snapshot or chunk is kept on disk (they exist only on the wire and in fixtures), and a v1 peer is **refused** by the version check, never converted (X9).
 
 ## 3. Decisions (each with its test)
 
 | # | Decision | Test that pins it |
 |---|---|---|
-| D1 | **Block selection is upstream's**: `SelectionService.isBlock`, `startBlockSelection(bufferPosition:)`, the held-Option press. The fork's `SelectionMode.rectangular`, its branches, `optionBypassesMouseReporting` and `Terminal.getRectangularText` are deleted. | Upstream's block-selection tests pass unmodified; the fork's 9 `testRectangular*` tests are deleted in the same commit, and the commit message lists them. The fork's mode-reset tests for `setSelection` stay, extended to assert `isBlock == false`. |
-| D2 | **Sync-end is upstream's** (`a329fc7`: latest value applied at the frame tick). The fork's `synchronizedOutputEnded` event and its drain branch are deleted. **Title coalescing is kept, re-expressed on the same mechanism**: the latest title is stored in the view's cross-thread state and applied in `applyPendingViewUpdates`; no per-title main-queue block. `TerminalEvent` keeps upstream's numbering. | `MainHopCoalescingTests` rewritten: N title changes and N sync-ends between two frame ticks cause one delegate call each, with the last value. `FrameDriverTests` (upstream) pass. IT-1075 is re-measured on the pin-bump PR (section 8). |
-| D3 | **Private state stays private.** One marked, contiguous block of internal accessors per class (`Terminal`, `Buffer`, `BufferLine`) is the only surface the replication files use. `curAttr` is read through `currentAttribute` and written through `setCurrentAttribute`. New fork state on `Terminal` (`respondsToQueries`, the valve's "disabled" flag) lives behind upstream's `cold` holder, not as new stored properties. | `scripts/check-fixed-layout.sh` passes. A source-scan test: the replication files reference no member of the three classes outside the accessor blocks' names and public API. |
-| D4 | **The parser hook is one function**, called from the single tail of the parse loop, plus one call where `finishProgramStatusSt` changes state outside the loop. | The every-byte corpus (`TerminalStateSnapshotTests`, 12 streams) passes; two streams are added: a cut at every byte of an OSC 7501, and of a CSI the whole-sequence fast path would take when complete. One A/B run of `Tools/SwiftTermBenchmarks` headless suite: no case slower than 1.5% in both orders (upstream's own bar). |
-| D5 | **Pty: the fork's close loop stays**, beside upstream's `eb710ea` and its new signal reset in the child. | `LocalProcessLifecycleTests` (upstream) pass; Scape's `PipeFDInheritanceTests` on the pin-bump PR. |
-| D6 | **The size guard stays**, inside upstream's `syncProcessWindowSizeIfNeeded()`: a size under 2 columns or 1 row is never sent to the child. | A unit test on the function's decision (0×0 and 1×1 send nothing; 2×1 sends). |
-| D7 | **The valve API is the fork's**: `synchronizedOutputTimeout: TimeInterval?` and `expireSynchronizedOutput() -> Bool`. Upstream's `Void` duplicate is removed. | Proof P1. |
-| D8 | **Mouse report encoding is upstream's** (functions that return bytes). The one call that sends them is user input and is not gated by `respondsToQueries`. | Proof P2 covers it from the other side: a replica still sends mouse reports. |
-| D9 | **`ByteRunScanner`: guard the empty span** on the Swift < 6.4 path (the line that has kept upstream's Linux job red since 2026-11-04). | The fork's tests complete in the Swift 6.2 container. |
-| D10 | Mechanical keeps: `public` on `search`, `cellDimension`, `lastResult`; `Buffer`'s mode flags through D3's block; the fork's `FrameDriver` test hook beside `setLinkRunning`. | compile + existing tests |
+| D1 | **Block selection is upstream's** (`isBlock`, `startBlockSelection(bufferPosition:)`, the held-Option press). The fork's `SelectionMode.rectangular`, its branches, `optionBypassesMouseReporting` and `getRectangularText` are deleted. | Upstream's block-selection tests pass unmodified. The fork's 9 `testRectangular*` tests are deleted **only with a table in that commit's message: each of the nine beside the upstream test that "covers X", or "not covered: why it is gone"** (C6). The `setSelection` mode-reset tests stay, extended to assert `isBlock == false`. |
+| D2 | **Sync-end is upstream's** (`a329fc7`). The fork's `synchronizedOutputEnded` event is deleted. **Title coalescing is kept, re-expressed on the same mechanism** (latest title in the view's cross-thread state, applied in `applyPendingViewUpdates`). `TerminalEvent` keeps upstream's numbering. | `MainHopCoalescingTests` rewritten: N title changes and N sync-ends between two frame ticks give one delegate call each, with the last value. Upstream's `FrameDriverTests` pass. IT-1075 re-measured (section 8). |
+| D3 | **Private state stays private.** One marked, contiguous block of internal accessors per class (`Terminal`, `Buffer`, `BufferLine`) is the only surface the replication files use. `respondsToQueries` and the valve's "disabled" flag live behind upstream's `cold` holder. | `scripts/check-fixed-layout.sh` passes, **its output quoted in PR B** (C4). A source-scan test: the replication files name no member of the three classes outside the accessor blocks and public API. |
+| D4 | **The parser hook is one function at the loop's single tail, and nowhere else.** `finishProgramStatusSt` is called from inside the loop and its caller reaches the tail, so it gets no hook of its own (no double count) (X4). Contract: the function sees every transition exactly once, with the batch index of its first byte and the bytes consumed; bytes handled before the tail (printable runs, the CSI-digit `continue`, OSC/APC continuation bytes at the start of a batch) belong to the open sequence by position, not by a hook call; a C0 executed inside a sequence is skipped, never replayed; a parser reset during the parse clears the record; a transition that consumes zero bytes records nothing. | The every-byte corpus (12 streams) plus one stream per contract clause, each cut at every byte: `consumed > 1` (whole CSI), CSI digits split across feeds, OSC and APC continuation bytes at a batch start, C0 inside CSI and inside OSC, RIS mid-sequence, an OSC 7501 with a well-formed and with a malformed (zero-byte) terminator. **A/B on the same merged engine with and without the hook** (not against the old fork): no headless case slower than 1.5% in both orders; allocations per parse call unchanged when the batch ends in ground state. |
+| D5 | **Pty: the fork's close loop stays**, beside upstream's `eb710ea` and its signal reset in the child. | Upstream's `LocalProcessLifecycleTests`; Scape's `PipeFDInheritanceTests` on the pin-bump PR. |
+| D6 | **The size guard stays**, inside upstream's `syncProcessWindowSizeIfNeeded()`. | Unit test on the decision: 0×0 and 1×1 send nothing; 2×1 sends. |
+| D7 | **The valve API is the fork's** (`synchronizedOutputTimeout: TimeInterval?`, `expireSynchronizedOutput() -> Bool`). | Proof P1. |
+| D8 | **Mouse report encoding is upstream's.** The one call that sends the bytes is user input, not gated. | P2: a replica still sends mouse reports. |
+| D9 | **`ByteRunScanner`, Swift < 6.4 path: no force-unwrap of an empty buffer.** The failing expression is `UnsafeRawPointer(buffer.baseAddress!)` in `vectorScanC0` (`ByteRunScanner.swift:208`) and the same line in its two siblings; `wordAndVectorScansAgreeWithScalarSearches` calls them directly with a zero-length span on its first iteration (`length = (0 * 37) % 200`) **[M]** (upstream job log: `ByteRunScanner.swift:208: Fatal error: Unexpectedly found nil`; test source `:130-147`). The public entry points guard length; these three do not. Each returns `start` when the base address is nil (X10). | That test passes in the Swift 6.2 container. |
+| D10 | Mechanical keeps: `public` on `search`, `cellDimension`, `lastResult`; the fork's `FrameDriver` test hook beside `setLinkRunning`. | compile + existing tests |
 
-## 4. The three proofs, inside PR B
+## 4. The proofs, inside PR B
 
-**P1. With `synchronizedOutputTimeout == nil` the terminal neither expires on its own nor asks anyone to run a timer.**
+### P1. With `synchronizedOutputTimeout == nil`, no timer runs or fires; the view still knows a synchronized update is open
 
-What I found at the spot **[M]** (trial tree `Terminal.swift:9237-9266`, `:10760`; fork `Terminal.swift:8250`, `:9528`): the fork's guard landed inside upstream's `applySynchronizedOutputWatchdog`, after the "not active → cancel" branch and before arming. That is correct for a plain `Terminal` on macOS and Linux. It leaves two paths ungated:
+**What each receiver does with `active`** (**[M]**, trial tree; the builder re-quotes from the merged tree before coding):
 
-- the `#if SWIFTTERM_EMBEDDED` branch above it calls the new delegate timer `scheduleSynchronizedOutputTimeout` unconditionally (not a build we ship, but the guard should not depend on that);
-- `ViewTerminal` **overrides** the whole function and hands the request to the view's own watchdog (`TerminalRenderOwner`). The guard is never reached, so a terminal inside a `TerminalView` still expires on the view's clock with the timeout set to `nil`. This is true in the fork today, before any merge. It does not affect the daemon or #1289 (plain `Terminal`), but it is exactly what S2.4's replica view would hit.
+| Receiver | Code | Uses `active` for |
+|---|---|---|
+| `Terminal.applySynchronizedOutputWatchdog`, normal build (`Terminal.swift:9245-9290`) | `guard active else { …synchronizedOutputTimeoutItem.cancel()… return }`, then `scheduleEventTimer(.synchronizedOutput, deadline: .now() + synchronizedOutputTimeoutSeconds, …)` | cancel or arm; nothing else |
+| the same, `#if SWIFTTERM_EMBEDDED` (`:9246-9249`) | `if active { tdel?.scheduleSynchronizedOutputTimeout(source: self, afterMilliseconds: 1_000) }` | ask the host for a timer; no cancel exists |
+| `ViewTerminal` override (`:10760`) → `SynchronizedOutputWatchdog.Target.update` (`Apple/SynchronizedOutputWatchdog.swift:57-91`) | `if active { … arm(deadline) } else { guard generation == state.armedGeneration else { return } … disarm() }` | arm, rearm, disarm; nothing else |
 
-Decision: the gate moves one level up, to the one non-overridden caller (`reconcileSynchronizedOutputWatchdog`): when the timeout is `nil` the watchdog is told "not active". All three paths are then covered by one line.
+**The view's knowledge of DEC 2026 does not come from this signal**: it reads `terminal.synchronizedOutputActive` (`TerminalRenderOwner.swift:274`, `TerminalSnapshot.swift:354`, `MacTerminalView.swift:4042`) **[M]**. No receiver uses `active` for more than arming, so the gate may tell the watchdog "do not arm" without a separate argument. If the re-quote finds otherwise, the gate passes `arm: false` and leaves `active` true.
 
-Pinned by tests, with no wall-clock dependence (the watchdog's counters and a recording delegate):
-- plain `Terminal`, `nil`: enter DEC 2026, feed, wait past the default timeout → still active; `armed == 0`; `expireSynchronizedOutput()` returns `true` once, then `false`.
-- `ViewTerminal`, `nil`: the view's handler is never called with `active == true`.
-- a delegate that records `scheduleSynchronizedOutputTimeout`: never called with `nil`.
-- setting `nil` while a timer is pending cancels it.
+Why the gate must move: the fork's guard sits inside the function's normal-build body. That is correct for a plain `Terminal` (the daemon, #1289) and is bypassed by the Embedded branch and by `ViewTerminal`'s override; the override bypass exists in the fork today (`Terminal.swift:9528` at `1b21b1bf3`) **[M]**.
 
-**P2. A replica answers nothing.** Every reply the terminal generates from parsed input goes through `sendQueryResponse`; upstream's four typed `sendResponse` overloads are routed through it. Pinned two ways:
+**Decisions** (X1, lead P1-1):
 
-- a source-scan test: in `Sources/SwiftTerm` outside `Apple/`, `Mac/`, `iOS/`, `tdel?.send` appears only inside two named functions (the gated query sink and the user-input sink) and the lines a short allow-list names with a reason (paste, semantic click);
-- a behaviour test over every reply path: the existing 12 parameterised queries plus one per report upstream added in this window (the builder lists them from `git log -S'sendResponse' 5cb37e865..d4f52faaa`, at least DECRQSS, the new DECRQM modes, OSC 110/111/112 colour queries, DECRQCRA when enabled). For each: the owner sends the expected bytes; a terminal with `respondsToQueries == false` sends none; and a mouse report is still sent.
+1. **Gate.** `reconcileSynchronizedOutputWatchdog` is `final` and is the only caller of `apply…`; with the timeout `nil` it passes "not active". `Terminal.synchronizedOutputActive` is untouched.
+2. **Setter reconciliation.** Setting `nil` cancels the terminal's own item (today) **and** marks the watchdog dirty and reconciles under `terminalLock`, so the view's watchdog is disarmed too (today it is not). Setting a value while a window is open re-arms.
+3. **Stale-callback rejection, in one place.** Both timer paths end in `Terminal.synchronizedOutputWatchdogFired(generation:)` (the terminal's own item, `:9281-9285`; the view's `Target.fire`, `SynchronizedOutputWatchdog.swift:114`) **[M]**. It returns without effect when the timeout is `nil`, in addition to its `active` and `generation` checks. A callback already in flight when `nil` is set therefore changes nothing.
+4. **Embedded contract.** The host timer is requested only through the same gate, so it is never requested with `nil`. SwiftTerm cannot cancel a host timer already requested, and upstream's host calls the public `expireSynchronizedOutput()`, which must keep working with `nil` (it is how a replica applies the owner's event). So for Embedded the rule is written at the delegate method: **a host that sets `nil` drops its own pending timer; a late call is treated as an ordered expiry.** We do not build or ship Embedded; this path is proved by construction (pins 7 and 8), and the plan says so plainly (X10).
 
-**P3. The digest sees everything the census names.** `DigestDescriber` descends into class instances (today it prints only the type name **[M]**), so `Terminal.cold`, `reportedOnly`, `payloads` and `programStatusStore` are compared field by field. Pinned by: for each holder, two terminals that differ in one field of it produce different digests.
+**Pins** (no wall-clock dependence: counters, recording delegates, callbacks delivered by hand):
+
+1. plain `Terminal`, `nil` from the start, DEC 2026 open: still active, `armed == 0`; `expireSynchronizedOutput()` returns `true` once, then `false`.
+2. `ViewTerminal`, `nil`, DEC 2026 open: **the view still holds its display** and the view watchdog's `armed == 0`.
+3. `ViewTerminal`, `nil`: `expireSynchronizedOutput()` returns `true` once; **the view is released and redraws**.
+4. **Arm → set `nil` → deliver the old callback**, plain `Terminal`: the captured work item is run by hand; the mode stays active; `fired` does not advance.
+5. **Arm → set `nil` → deliver the old callback**, `ViewTerminal`: the view watchdog is disarmed by the setter; `Target.fire()` called by hand changes nothing.
+6. **Arm → set `nil` → deliver the old callback**, host timer: the normal-build seam (pin 7) records one request before `nil`, none after; a direct call to `synchronizedOutputWatchdogFired` with the old generation changes nothing.
+7. The decision "request a timer, cancel, or nothing" is one pure function of (active, timeout is nil, armed generation), used by all three branches and unit-tested in the normal build.
+8. Source pins: no `override func reconcileSynchronizedOutputWatchdog`; the Embedded branch's only timer request is on that function's result.
+
+### P2. A replica answers nothing, and still sends what the user does
+
+**Two sinks, and nothing else writes to the delegate** (X2):
+
+- **the reply sink** (`sendQueryResponse`, gated by `respondsToQueries`): every byte generated from parsed input. That is the whole `sendResponse` family (labelled text, unlabelled text, bytes, prefix + text, prefix + bytes, prefix + text + suffix, variadic), the focus report sent when DECSET 1004 is enabled, and Kitty clipboard replies.
+- **the user-input sink** (not gated): `sendUserInput`, paste (including Kitty paste), mouse packets (D8), semantic-prompt click packets and repeated semantic cursor movement, and focus reports caused by a real focus change. Upstream sends the semantic click through `sendResponse` (`Terminal.swift:3540` upstream) **[M]**; it moves to the user-input sink, or a replica's clicks would be swallowed.
+
+Pinned:
+
+- **Source scan (C5):** in `Sources/SwiftTerm` outside `Apple/`, `Mac/`, `iOS/`, the pattern `tdel\s*\?\s*\.\s*send\s*\(` (so `tdel?.send (` and `terminal.tdel?.send(` both match) appears only inside the two sinks. The allow-list is closed and empty unless a line is added with a reason; any other match fails.
+- **Site table:** the builder enumerates, from the merged tree, every call that reaches either sink and records it in the findings record with its sink. `git log -S` is only a cross-check.
+- **Behaviour, one case per reply site in that table**, including a clipboard reply and the 1004 enable-time focus report: the owner sends the expected bytes; a terminal with `respondsToQueries == false` sends none.
+- **Behaviour, user input on a replica:** a mouse packet, a semantic click, a paste and `sendUserInput` are all sent with `respondsToQueries == false`.
+
+### P3. The census and the digest prove different things (X3)
+
+- **The census proves classification coverage, not serialization correctness.** It shows that every stored property was looked at and marked carried or excluded. That a carried field is exported and imported correctly is proved by the corpus (digests equal at every cut) and by a populated fixture per field (below).
+- **The digest compares logical state, in canonical form.** It descends into a class instance **only for holders the census names**, tracks visited objects (no cycles), walks superclass mirrors, and **fails instead of truncating**: the depth-eight "…" becomes a test failure. Back-references (delegate, parent terminal, any `weak`/`unowned`) are excluded by name with a reason.
+- **`payloads` is not compared by reflection.** Atom codes, cache slots, collection thresholds and retry counters are allocation state: two terminals with the same hyperlinks may hold different atoms. The canonical comparison is the one the digest already uses per cell (the link's target string) plus the active hyperlink's target. The holder's fields are census exclusions, each with that reason.
+- **What reflection cannot see is listed and audited by hand in the findings record**: static atom tables, storage behind unsafe pointers (cell pages are covered by the per-cell comparison to full width), lazily built caches. Each gets a line: compared canonically, rebuilt on import, or excluded, and why.
+- **Fixtures.** For every carried field and every named holder, a test sets a non-default value on the owner, exports, imports, and requires equal digests, and separately requires that two terminals differing only in that field digest differently. A holder that is `nil` or absent at reflection fails the census test (the lead's condition a).
 
 ## 5. The format
 
-- **`TerminalReplayStream.swift` is deleted in PR A**, before the merge. Scape's one use (`TerminalReplicationHarness.swift:190`, the `.byteStream` format, and its measured-not-required class `SnapshotFormatT3ByteStreamTests`) is removed in the pin-bump PR.
-- **`STSS` becomes version 2. The v2 decoder refuses v1 bytes**, and refuses any other version, before reading a field. Pinned: a v1 header and a recorded v1 snapshot both throw; nothing is imported. `STSH` moves to 2 with it, so one number describes a build (a chunk never pairs with a screen part of another version).
-- **The field census decides field by field.** Criterion: any terminal state that a reader of the replica can observe (what is drawn, what the next byte does, what a query would answer, what the host reads through public API) is **carried**; anything else is **excluded with a written reason**. The census is one table in the source: every stored property of `Terminal`, `Buffer`, `BufferLine` and of each reference-typed holder they own, each marked carried or excluded.
-- **The census test fails when state appears that the census does not name**: the reflected property names of those types (and holders) must equal the census's names, both ways. This is what turns the next upstream field into a failing test at merge time.
-- Carried explicitly in v2 (from the findings, section 4): `pendingWrap` and `savedPendingWrap` per buffer, **restored after the cursor is set** (the cursor setters clear the flag); character protection (terminal and per buffer, saved); `characterProtectionMode`; `keyboardActionMode`, `sendReceiveMode`, `backarrowKeyMode`, `reverseWraparoundExtended`, `noClearOnColumnChange`; `cursorStartsNewGrapheme`; `cold.moreFix`; the OSC 10/11 overrides in `cold` (the OSC colour, not the host's); the modes in `reportedOnly`. Removed: `savedWraparound`, `savedReverseWraparound`. `bulkInsertBlocked` is derived on import. `usedStart` is excluded (storage bound; cells are compared to full width).
-- **Program status is carried** (a host reads it through public API). Its change on child exit has no byte behind it: the replica applies it when it applies **the session's existing exit event**. No new ring event. The fork exposes the one call the replica makes; #1289's exit path calls it when it re-gates.
-- Images stay "declared lost until redraw".
+- **`TerminalReplayStream.swift` is deleted in PR A.** Scape's one use (`TerminalReplicationHarness.swift:190`, the `.byteStream` format, and `SnapshotFormatT3ByteStreamTests`) goes in the pin-bump PR.
+- **`STSS` and `STSH` are both version 2, from ONE constant.** Each decoder refuses v1, and any other version, before reading a field. Pinned for each: a v1 header and a recorded v1 payload throw and nothing is imported.
+- **The version names the schema, not the session** (X5). It does not stop a v2 chunk being paired with an unrelated v2 screen part. That stays the job of the checks that exist today and are kept and re-pinned: a chunk carries its buffer's grid and is refused when the grid differs; the host pairs parts by its own `asOfSeq`.
+- **The field census decides field by field.** Criterion: terminal state a reader of the replica can observe (what is drawn, what the next byte does, what a query would answer, what the host reads through public API) is **carried**; anything else is **excluded with a written reason**. **Images are the stated exception**: Kitty and sixel images are drawable state that is not carried (X6).
+- **The census test** compares reflected property names to the census both ways (see P3 for what that does and does not prove).
+- **Preservation obligations** (already in v1; each keeps an explicit test): cursor style, margins, tab stops, charsets and saved cursors for **both** buffers, protection per cell.
+- **Restore order per buffer:** everything that can touch `x` or `y` first (cursor, saved cursor, origin mode, margins, resize); protection **through its setters**, so `bulkInsertBlocked` is derived, never decoded; **`pendingWrap` last; `savedPendingWrap` restored as its own field**. Pins: a pending-wrap cut on the **normal** buffer and one on the **alternate** buffer each continue identically to the owner; `savedPendingWrap` is proved by a restore-cursor (DECRC) fed after the import.
+- New in v2: `pendingWrap`, `savedPendingWrap`; character protection (terminal, per buffer, saved) and `characterProtectionMode`; `keyboardActionMode`, `sendReceiveMode`, `backarrowKeyMode`, `reverseWraparoundExtended`, `noClearOnColumnChange`; `cursorStartsNewGrapheme`; `cold.moreFix`; the `reportedOnly` DEC modes **and `reportedOnly.attributeChangeExtent`**. Removed: `savedWraparound`, `savedReverseWraparound`. Excluded: `usedStart` (storage bound).
+- **Hyperlinks:** targets are carried; **atom identities never are**. The importer rebuilds upstream's link cache by interning each target through the normal path (X6).
+- **OSC 10/11 overrides:** the snapshot carries the OSC colour only. The importer installs it **over the replica's own host colour**, so OSC 110/111 on the replica restore the replica's theme. Pin: owner and replica with different host colours; after import and OSC 110 each shows its own.
+- **Program status is carried with its ordering and replacement semantics**, not only the public record list: an update fed after import replaces or appends exactly as on the owner (pin). Its change on child exit has no byte behind it: the replica applies it with **the session's existing exit event**. No new ring event.
+- **Import onto a terminal that already has state** (a resync) **resets image state**: Kitty and sixel images, placements, pending transmissions and animation timers are cleared, so nothing stale is drawn over imported text. Pin: import over a terminal holding an image leaves no image and no live timer (X6).
+- **State changes with no byte (C3).** The builder lists every state change in the merged core driven by a clock or callback (timers, `asyncAfter`, date comparisons in `Sources/SwiftTerm` outside `Apple/`, `Mac/`, `iOS/`). Each is an ordered host event or a census exclusion with a reason. The list goes in PR B's findings record **and to the daemon lead**. Known so far: the DEC 2026 valve; program status on exit.
 
 ## 6. How PR B is structured so it can be read
 
-One PR, one review, commits in this order. Each commit builds except where stated; the reviewer reads commit by commit.
+One PR, one review, commits in this order. **The gate runs at the head.**
 
-1. **The merge commit**, with only mechanical resolutions (D10, the Pty and `SearchService` hunks, both-kept hunks). Decision hunks are resolved to upstream's side with a `// IT-2001: Dn` marker where fork code was dropped. This commit is allowed not to build; its message says so and lists every conflicted file with the side taken.
-2. **One commit per decision, named `IT-2001 D1` … `D9`**, each with its test. After D1 to D9 the tree builds.
-3. **The auto-merge audit commit**: fixes for files git merged without a conflict, each named in the message. The known list: the duplicate `expireSynchronizedOutput`, `noteWritten(from:upTo:)`, the `sendResponse` overloads, the event numbering, the watchdog gate. The builder reads every auto-merged file the fork had changed (findings, section 3) against both sides and adds what else turns up.
-4. **Format v2 and the census** (section 5).
-5. **The three pins** (P1, P2, P3) if not already landed with their decisions.
-6. A findings record under `docs/spikes/`, as the two earlier merges left: which side won each hunk and why.
+1. **A true two-parent merge of `d4f52faaa`** with mechanical resolutions (D10, the Pty and `SearchService` hunks, both-kept hunks), decision hunks taken from upstream's side with a `// IT-2001: Dn` marker, **and the compile repairs** (the duplicate `expireSynchronizedOutput`, `noteWritten(from:upTo:)`, references to the two removed saved fields). Every repair is listed in the commit message. **Goal: this commit and every later one compile** (X8). Tests are green only at the head; the PR body says from which commit the fork's replication tests pass. If the builder finds the merge commit cannot compile without making a decision, the PR body **declares the range from the merge commit to the named first building commit non-bisectable**, in those words.
+2. **One commit per decision, `IT-2001 D1` … `D9`**, each with its test.
+3. **The auto-merge audit commit** (X7). Named checks, each answered in the findings record:
 
-PR B merges into `scape-selection-api` with a **merge commit**. The builder records the resulting SHA; that SHA is the pin.
+   | Area | Check |
+   |---|---|
+   | `CellStorage`, `CellArena` | the fork's lazily grown attribute table against upstream's attribute cache (`768c4f0`): a cached identifier never outlives a table growth; `CellStorageTests` including the full-growth test |
+   | `CharData`, payloads | payload lifetime and collection (`41502dc`): an imported line's links survive a collection; `getText(maxUTF8Bytes:)` still bounded |
+   | `SearchEngine`, `SearchService` | the fork's `public` grants against upstream's line cache; the lock contract |
+   | `KittyClipboardProtocol` | reply and paste sinks (P2) |
+   | `HeadlessTerminal`, `LocalProcess`, `TerminalIOPipeline` | `onOutput` is still called once per fed batch, in order, under the lock, with `directDelivery` false and true |
+   | `CircularList`, `TerminalOptions` | line capacity and trimming as the snapshot assumes (the `aBufferHoldingMoreLinesThanItsRowsRoundTrips` case) |
+   | `Package.swift` | compiler and trait branches on Swift 6.2 and 6.4; `SWIFTTERM_EXCLUDE_APPLE` kept; no new dependency on Linux |
+   | every other auto-merged file the fork had changed | read against both sides |
+4. **Format v2 and the census.**
+5. **The pins** (P1, P2, P3) not already landed with their decisions.
+6. **A findings record** under `docs/spikes/`: which side won each hunk and why; P2's site table; P3's hand audit; C3's list; D1's table; the layout check's output; the Linux baseline (section 8).
 
-## 7. Invariants (true after PR B; each is pinned by a test above or below)
+## 7. Invariants (true after PR B)
 
 1. A snapshot is taken under `terminalLock`, between feeds; `pendingParserBytes` fed to a fresh parser puts it in the same state; `nil` means "wait".
-2. Owner and replica digests are equal at every cut of the corpus, and again after the rest of the stream, whole and streamed.
-3. A replica (`respondsToQueries == false`) writes nothing to its delegate except user input.
-4. With `synchronizedOutputTimeout == nil`, DEC 2026 ends only by the application's own reset or by `expireSynchronizedOutput()`.
-5. No state change in the owner is invisible to the replica: it follows from a byte, from an ordered ring event (resize, valve, exit), or it is excluded in the census.
-6. The decoder never half-decodes: a wrong magic, version or length throws before any state changes.
+2. Owner and replica digests are equal at every cut of the corpus, and after the rest of the stream, whole and streamed.
+3. A replica writes nothing to its delegate except user input.
+4. With `synchronizedOutputTimeout == nil`, DEC 2026 ends only by the application's reset or by `expireSynchronizedOutput()`; a view shows the held frame until then.
+5. No state change in the owner is invisible to the replica: it follows from a byte, from an ordered event (resize, valve, exit), or it is a census exclusion.
+6. A decoder never half-decodes: wrong magic, version or length throws before any state changes.
 7. A history chunk is refused, changing nothing, once its buffer's grid has changed.
 8. Hot-path types keep a fixed layout; the fork adds no stored property to `Terminal`.
 9. The shared sources build with `Apple/`, `Mac/`, `iOS/` excluded, on Swift 6.2.
 
 ## 8. The gate
 
-**Fork, PR A and PR B (all green before merge):**
+**Fork, PR A and PR B, at the head:**
 
 | Check | Where |
 |---|---|
 | `swift build`; `swift test` (whole suite, through the shared SwiftPM lock) | macOS |
-| `swift build --target SwiftTerm`; `swift test --filter "TerminalStateSnapshotTests\|ReplicationPrimitivesTests\|CellStorageTests\|LocalProcessLifecycleTests"`, then the whole suite | `swift:6.2-noble` container. **This is our Linux evidence; upstream's job is red.** A test that fails there and also fails at upstream `d4f52faaa` is recorded, not fixed, unless it is D9. |
-| `scripts/check-fixed-layout.sh` | macOS, release |
-| `swift test -c release -Xswiftc -enable-testing --filter ReplicationSizeTimeTests`: the screen part under 50 ms and 1 MiB at 200 × 60 | macOS |
+| `swift build --target SwiftTerm`; the whole suite | `swift:6.2-noble` container. **This is our Linux evidence; upstream's job is red.** First the builder records the exact failures of unmodified upstream `d4f52faaa` plus D9 in the same container (test names, quoted). Only a test on that list may fail in PR B, and **never a replication-critical one** (`TerminalStateSnapshotTests`, `ReplicationPrimitivesTests`, `ReplicationSizeTimeTests`, the census, P1 to P3, `CellStorageTests`, `LocalProcessLifecycleTests`) (X10). |
+| `scripts/check-fixed-layout.sh` (output quoted) | macOS, release |
+| `ReplicationSizeTimeTests`, release: the screen part under 50 ms and 1 MiB at 200 × 60 | macOS |
 | D4's benchmark A/B | macOS, once |
-| Assertion audit for every test file the merge touched: no pre-merge assertion missing unless its commit names it | as in the IT-304 record |
+| Assertion audit of every test file the merge touched: no pre-merge assertion missing unless its commit names it | as in the IT-304 record |
 
-**Scape pin-bump PR (all green before merge):**
+**Scape pin-bump PR:**
 
 | Suite | Bar |
 |---|---|
-| T3 full sweep, `SCAPE_T3_FULL=1 swift test --filter SnapshotFormatT3` | every cut passes whole and streamed; the comparator tells every one-byte-earlier pair apart; the cut and resync counts are reported beside the last run's (1,238 cuts, 8 resyncs, 2,440 pairs). A count that moved is explained, not waved through. |
-| Full Mac headless run, `scripts/run-headless-tests.sh`, with `required-tests.tsv` and `check-headless-core.py` (pins agree) | all required identities exactly once |
+| Compile-only Xcode build of the app and test targets (C2) | clean |
+| The python guards (C2): `check-headless-core.py` (pins agree), `check-required-tests.py`, `check-headless-inert.py`. This is my reading of "the three"; the builder runs every `scripts/check-*.py` the headless runner runs. | pass |
+| **A sweep of `ScapeTests` and `Headless/Tests` for source-text pins** that name a SwiftTerm symbol or the pin SHA (tests that read source files as text), each updated or confirmed (C2) | listed in the PR |
+| T3 full sweep (`SCAPE_T3_FULL=1`) | every cut passes whole and streamed; the comparator tells every one-byte-earlier pair apart; counts reported beside the last run's (1,238 cuts, 8 resyncs, 2,440 pairs); a count that moved is explained |
+| Full Mac headless run with `required-tests.tsv` | all required identities exactly once |
 | Headless Core on Linux amd64 and arm64 (CI) | green |
-| Xcode terminal tests: the `ScapeTests` files that import SwiftTerm, at least `PipeFDInheritanceTests`, `CodexDeliveryPolicyTests`, `CursorDisplayTests`, `ComposerDeliveryGateTests`, `ShellTerminalSpectatorTests`, `TerminalRedrawGateTransitionTests`, `SwiftTermViewFocusGuardTests`, `KimiStatusAndScreenTests` | green |
-| IT-1075 re-measured: the same repro (a dozen agent terminals in tight DEC 2026 frame loops with title spinners) | the main queue does not grow; the number is recorded beside the old one |
+| Xcode terminal tests: the `ScapeTests` files that import SwiftTerm | green |
+| IT-1075 re-measured with the same repro | the main queue does not grow; the number recorded beside the old one |
 
-**What changes in Scape, file by file** (at `f63b5c5f6`) **[M]**:
+**What changes in Scape** (at `f63b5c5f6`) **[M]**:
 
 | File | Change |
 |---|---|
-| `Package.swift:403`, `Package.resolved:243`, `Scape.xcodeproj/project.pbxproj:9679`, `Scape.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved:153` | the four pin locations, all to PR B's merge SHA |
+| `Package.swift:403`, `Package.resolved:243`, `Scape.xcodeproj/project.pbxproj:9679`, `Scape.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved:153` | the four pin locations, to PR B's merge SHA |
 | `docs/claude/headless-daemon.md:122` | the pin and the API list it names |
-| `Scape/Terminal/ScapeTerminalView.swift:1374-1384` | the Option-click rectangular selection: removed; the view's own Option-drag does it (D1) |
-| `Scape/Terminal/ScapeTerminalView.swift:1225-1267` | the `dataReceived(slice:)` override, unavailable upstream: becomes a Scape-named method for direct feeds that calls `feed(byteArray:)`; its filtering and accounting are unchanged |
-| `ScapeTests/CodexDeliveryPolicyTests.swift`, `ScapeTests/CursorDisplayTests.swift` | call the renamed method |
-| `Headless/Tests/TerminalReplicationHarness.swift`, `SnapshotFormatT3Tests.swift`, `Headless/required-tests.tsv` | the `.byteStream` format and `SnapshotFormatT3ByteStreamTests` removed; format v2; any exclusion-name changes |
-| anything else the compiler names | fixed in the same PR and listed in its description; one known candidate is the single cursor-colour call in `ScapeTerminalView` |
+| `Scape/Terminal/ScapeTerminalView.swift:1374-1384` | the Option-click rectangular selection: removed (D1) |
+| `Scape/Terminal/ScapeTerminalView.swift:1225-1267`; `ScapeTests/CodexDeliveryPolicyTests.swift:1851` | C1, below |
+| `Headless/Tests/TerminalReplicationHarness.swift`, `SnapshotFormatT3Tests.swift`, `Headless/required-tests.tsv` | `.byteStream` and its test class removed; format v2; exclusion names |
+| anything else the compiler names | fixed in the same PR and listed in its description |
+
+**C1 (a P1 for this PR): `ScapeTerminalView.dataReceived(slice:)`.** Who calls the override today **[M]**:
+
+- **Not the pty path.** At the current pin the process delegate is a private adapter inside SwiftTerm that parses on the IO thread; nothing in the fork calls the view's `open func dataReceived(slice:)` (`git grep` in `Sources/`: its only definition is `MacLocalTerminalView.swift:449`, no caller). Scape's own comment says so (`ScapeTerminalView.swift:1117-1125`: it "only sees DIRECT feeds — for a real tab its byte tallies stay 0").
+- **In Scape, one caller: a test** (`CodexDeliveryPolicyTests.swift:1851`). `CursorDisplayTests` names it only in a comment.
+- Live output is already accounted through `setProcessOutputHandler { tally.noteBatchApplied() }` (`ScapeTerminalView.swift:1157-1158`), which exists unchanged upstream (`MacLocalTerminalView.swift:304`).
+
+So the merge takes nothing away: upstream turns an override the pty never reached into a compile error. The override becomes a Scape-named direct-feed method with the same body; the accounting stays on the output handler. **Test through the real process path:** a `ScapeTerminalView` runs a real child that prints a known string; the output epoch advances by the handler's tally, the text is on screen, and the direct-feed method was not called.
+
+One fact for the daemon lead, **not introduced by this merge and out of its scope**: because the pty path does not pass that method, Scape's `SyncOutputFilter` and the dev-server log tee inside it do not see live pty bytes at the current pin either **[M]** (same evidence). If either is believed to be active on live tabs, that is a separate ticket.
 
 ## 9. Nash's part: about one hour, at the end
 
 On a build of the pin-bump PR. Tick each; anything odd, say which step.
 
-- [ ] **Paste:** paste a multi-line command into a shell; paste into Claude Code's prompt; paste something long (a few hundred lines).
-- [ ] **Select and copy:** drag-select text, copy, paste elsewhere. Double-click a word, a URL and a file path. Triple-click a long wrapped line (it now selects the whole logical line).
-- [ ] **Block selection:** hold Option and drag a rectangle in a shell; copy it; check the pasted block. Do the same inside Claude Code. Then Option-click once inside Claude Code's input (its cursor should move; no selection should start).
-- [ ] **Resize and split:** drag the window edge while output streams; split a pane; close the split. Switch to another tab, resize the window, switch back: the hidden tab's content is right.
-- [ ] **Mouse in vim:** `vim` with `:set mouse=a`: click to place the cursor, drag to select, scroll with the wheel and the trackpad. Then `less` on a long file: wheel and trackpad scroll it.
-- [ ] **Scrollback while output streams:** run something that prints continuously, scroll up and stay there, select text while it streams, scroll back to the bottom.
-- [ ] **Many agents:** a dozen agent sessions working at once for a few minutes: typing stays responsive, titles keep updating.
-- [ ] **Odds and ends:** Tab completion in a brand-new tab straight away; find-in-terminal; a few accented or CJK characters through the input method; move the window to another display and check the text is sharp.
+- [ ] **Paste:** a multi-line command into a shell; into Claude Code's prompt; something long (a few hundred lines).
+- [ ] **Select and copy:** drag-select, copy, paste elsewhere. Double-click a word, a URL, a file path. Triple-click a long wrapped line (it now selects the whole logical line).
+- [ ] **Block selection:** Option-drag a rectangle in a shell, copy it, check the paste. The same inside Claude Code. Then Option-click once in Claude Code's input: its cursor moves and no selection starts.
+- [ ] **Resize and split:** drag the window edge while output streams; split a pane; close it. Switch tab, resize the window, switch back: the hidden tab is right.
+- [ ] **Mouse in vim:** with `:set mouse=a`, click, drag-select, wheel and trackpad scroll. Then `less` on a long file: wheel and trackpad scroll it.
+- [ ] **Scrollback while output streams:** scroll up and stay there, select text while it streams, return to the bottom.
+- [ ] **A Claude Code or Codex session streaming a long answer: no flicker and no half-drawn frames.**
+- [ ] **Many agents:** a dozen sessions working for a few minutes: typing stays responsive, titles keep updating.
+- [ ] **Odds and ends:** Tab completion in a brand-new tab at once; find-in-terminal; accented or CJK input; move the window to another display, text stays sharp.
 
 ## 10. Effort
 
+Revised after the two reviews: the proofs are more work than revision 1 allowed for (the canonical digest and its fixtures, the reply-site table, callback tests, image reset, the Linux baseline, the audit table).
+
 | Step | Days |
 |---|---:|
-| PR A: prep (delete the replay stream, accessor blocks, parser hook as one function) | 0.5 to 1 |
-| PR B: merge commit and D1 to D10 | 2 |
-| PR B: audit commit, format v2, census, P1 to P3 | 1.5 |
-| PR B: gate (macOS, Linux container, layout, benchmark) | 0.5 |
-| Scape pin-bump PR: changes and its gate | 1 to 1.5 |
+| PR A: prep | 1 |
+| PR B: merge commit with compile repairs, D1 to D10 | 2.5 to 3 |
+| PR B: audit table, format v2, census and fixtures, P1 to P3, C3's list | 3 to 4 |
+| PR B: gate (macOS, Linux baseline and run, layout, benchmark A/B) | 1 |
+| Scape pin-bump PR: changes, C1's test, its gate | 1.5 to 2 |
 | IT-1075 re-measure; Nash's hour | 0.5 |
-| **Total** | **6 to 7** (range 5 to 8) |
+| **Total** | **9.5 to 11.5** (range 8 to 13) |
 
-All figures are estimates **[I]**. The fallback checkpoint is in section 2.
+Estimates **[I]**. **The day-5 checkpoint stays** (section 2). On this estimate PR B is not through its gate by day 5, so unless #1289 is itself held longer, **the fallback is the likely outcome**: #1289 merges on the old pin, does not leave the building, and the bump lands before S2.4.
 
 ## 11. Out of scope
 
-- Offering fork commits upstream (the fd close loop, the `ByteRunScanner` guard, the size guard, the valve API, title coalescing, the lazy attribute table, `onOutput`, `respondsToQueries`, the parser hook): a later ticket. D9's one-line fix is carried in the fork now regardless.
+- Offering fork commits upstream: a later ticket. D9's fix is carried in the fork now regardless.
 - Upstream commits after `d4f52faaa`.
-- Using upstream's public `LocalProcess.updateWindowSize` in the session host, and any other change to #1289 beyond re-gating on the new pin.
-- S2.4's replica view. (P1 removes one obstacle to it; nothing else here builds it.)
-- Linux CI on the fork and the weekly upstream canary (findings, 6.6 items 8 and 9): recommended, separate tickets.
+- `LocalProcess.updateWindowSize` in the session host: a ticket after #1289 merges (section 2). Any other change to #1289 beyond its re-gate list.
+- S2.4's replica view (P1 removes one obstacle; nothing else here builds it).
+- Whether `SyncOutputFilter` and the dev-server log tee should see live pty bytes (section 8, C1).
+- Linux CI on the fork and the weekly upstream canary: recommended, separate tickets.
 - Replacing `getText(maxUTF8Bytes:)` with upstream's bounded snapshots.
-- Compatibility between format versions. There is none: v2 refuses v1.
+- Compatibility between format versions: there is none; v2 refuses v1.
