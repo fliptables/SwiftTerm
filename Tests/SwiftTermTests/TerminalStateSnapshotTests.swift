@@ -57,7 +57,9 @@ final class TerminalStateSnapshotTests {
             let ownerCapture = Capture()
             let owner = make(ownerCapture, responds: true)
             for step in units[..<cut] { apply(step, to: owner) }
-            let snapshot = owner.exportState()
+            guard let snapshot = owner.exportState() else {
+                return "cut \(cut): the export refused (wait) with pendingParserBytes \(String(describing: owner.pendingParserBytes))"
+            }
             let encoded = snapshot.encoded()
             guard let decoded = try? TerminalStateSnapshot(encoded: encoded) else {
                 return "cut \(cut): the encoded snapshot does not decode"
@@ -84,7 +86,9 @@ final class TerminalStateSnapshotTests {
             let freshCapture = Capture()
             let fresh = make(freshCapture, responds: true)
             for step in units[..<cut] { apply(step, to: fresh) }
-            let export = fresh.exportForStreaming()
+            guard let export = fresh.exportForStreaming() else {
+                return "cut \(cut): the streaming export refused (wait)"
+            }
             guard let screen = try? TerminalStateSnapshot(encoded: export.screen.encoded()) else {
                 return "cut \(cut): the screen part does not decode"
             }
@@ -208,7 +212,7 @@ final class TerminalStateSnapshotTests {
         owner.feed(text: "\u{1b}[?1049h\u{1b}[24;1Hx")
         let replica = Terminal(delegate: Capture(), options: TerminalOptions(cols: 80, rows: 24, scrollback: 500))
         replica.respondsToQueries = false
-        replica.importState(try TerminalStateSnapshot(encoded: owner.exportState().encoded()))
+        replica.importState(try TerminalStateSnapshot(encoded: try #require(owner.exportState()).encoded()))
         #expect(owner.replicationDigest() == replica.replicationDigest())
         let tail = (0..<40).map { "\u{1b}[24;1H\r\nline \($0)" }.joined()
         owner.feed(text: tail)
@@ -226,9 +230,9 @@ final class TerminalStateSnapshotTests {
         #expect(Set(Terminal.digestExcludedLineProperties.keys).subtracting(lineLabels).isEmpty)
     }
 
-    @Test func aDifferentFormatVersionIsRefused() {
+    @Test func aDifferentFormatVersionIsRefused() throws {
         let terminal = Terminal(delegate: Capture())
-        var encoded = terminal.exportState().encoded()
+        var encoded = try #require(terminal.exportState()).encoded()
         encoded[4] &+= 1
         #expect(throws: TerminalStateSnapshotError.self) { try TerminalStateSnapshot(encoded: encoded) }
         #expect(throws: TerminalStateSnapshotError.self) { try TerminalStateSnapshot(encoded: Array(encoded.prefix(10))) }

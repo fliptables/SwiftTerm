@@ -27,7 +27,7 @@ final class ReplicationSizeTimeTests {
         var screenSize = 0, historySize = 0, chunkCount = 0, maxChunk = 0, unsplitSize = 0
         for _ in 0..<5 {
             var t = Date()
-            let export = owner.exportForStreaming()
+            let export = try #require(owner.exportForStreaming())
             record("1-underLock(screen+historyCopy)", Self.ms(t))
             t = Date()
             let screenBytes = export.screen.encoded()
@@ -55,7 +55,7 @@ final class ReplicationSizeTimeTests {
             #expect(replica.replicationDigest() == owner.replicationDigest())
 
             t = Date()
-            unsplitSize = owner.exportState().encoded().count
+            unsplitSize = try #require(owner.exportState()).encoded().count
             record("6-unsplitExportEncode", Self.ms(t))
         }
         #if DEBUG

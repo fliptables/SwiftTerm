@@ -90,8 +90,8 @@ extension Terminal {
     /// Exports the screen part and copies the history for ``TerminalStreamingExport``. Call
     /// under `terminalLock`, between feeds; the cost under the lock is the screen part plus a
     /// packed copy of each history line.
-    public func exportForStreaming() -> TerminalStreamingExport {
-        let screen = exportState(skippingHistory: true)
+    public func exportForStreaming() -> TerminalStreamingExport? {
+        guard let screen = exportState(skippingHistory: true) else { return nil }
         let arena = replicationCellArena.snapshotCopy()
         var history: [(isAlternate: Bool, cols: Int, rows: Int, lines: [BufferLine], promptRow: Int?)] = []
         for (isAlternate, buffer) in [(false, replicationNormalBuffer), (true, replicationAltBuffer)] {

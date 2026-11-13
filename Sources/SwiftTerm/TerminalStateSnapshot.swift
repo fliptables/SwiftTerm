@@ -235,11 +235,11 @@ extension Terminal.TerminalConformance: Equatable {}
 
 extension Terminal {
     /// Exports the emulator state. Call under `terminalLock`, between feeds.
-    public func exportState() -> TerminalStateSnapshot {
+    public func exportState() -> TerminalStateSnapshot? {
         exportState(skippingHistory: false)
     }
 
-    func exportState(skippingHistory: Bool) -> TerminalStateSnapshot {
+    func exportState(skippingHistory: Bool) -> TerminalStateSnapshot? {
         var dropped = 0
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
