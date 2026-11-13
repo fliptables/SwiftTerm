@@ -1347,6 +1347,9 @@ struct TerminalViewCrossThreadState: Sendable {
     /// The last cursor color the terminal set (OSC 12) or reset (OSC 112),
     /// waiting for `applyPendingViewUpdates`.
     var pendingCursorColor: PendingCursorColor?
+    /// The last window title the terminal set (OSC 0/2), waiting for
+    /// `applyPendingViewUpdates` (IT-1075, IT-2001 D2).
+    var pendingTitle: String?
 }
 
 /// A cursor color change that waits for the main actor.
@@ -2597,7 +2600,6 @@ extension TerminalView {
                 ? 1
                 : Double(displayBuffer.yDisp) / Double(maxScrollback)
         }
-        // IT-2001: D2. Sync-end is upstream's (a329fc7).
         // A program that wraps each frame in 2026 ends it thousands of times
         // a second. Record only the latest position: the frame driver applies
         // it once, at its next tick (applyPendingViewUpdates).
@@ -2609,12 +2611,13 @@ extension TerminalView {
     /// the last call. The frame driver calls this before it draws.
     func applyPendingViewUpdates ()
     {
-        let (position, cursorStyle, cursorColor) = crossThreadState.withLock { state in
+        let (position, cursorStyle, cursorColor, title) = crossThreadState.withLock { state in
             let pending = (state.pendingSyncEndScrollPosition, state.pendingCursorStyle,
-                           state.pendingCursorColor)
+                           state.pendingCursorColor, state.pendingTitle)
             state.pendingSyncEndScrollPosition = nil
             state.pendingCursorStyle = nil
             state.pendingCursorColor = nil
+            state.pendingTitle = nil
             return pending
         }
         if let cursorStyle {
@@ -2637,26 +2640,8 @@ extension TerminalView {
             updateScroller()
             terminalDelegate?.scrolled(source: self, position: position)
         }
-    }
-
-    /// Applies a coalesced latest-value event (IT-1075). Shared by the Mac and
-    /// iOS drains so both platforms run — and the tests cover — one body.
-    ///
-    /// Delivery contract: only the latest title / scroll position since the
-    /// previous drain is delivered, and these callbacks are not ordered
-    /// against callbacks still dispatched individually through `onMain`
-    /// (directory, size, colors). Final values are always delivered.
-    func applyCoalescedPayloadEvent (_ event: TerminalEvent, payload: TerminalEventPayload)
-    {
-        switch event {
-        case .synchronizedOutputEnded:
-            updateScroller()
-            frameDriver.markDirty()
-            terminalDelegate?.scrolled(source: self, position: payload.synchronizedOutputScrollPosition)
-        case .titleChanged:
-            terminalDelegate?.setTerminalTitle(source: self, title: payload.title)
-        case .bufferActivated, .mouseModeChanged, .bell, .programStatusChanged:
-            break
+        if let title {
+            terminalDelegate?.setTerminalTitle(source: self, title: title)
         }
     }
 
@@ -4429,10 +4414,10 @@ extension TerminalView {
         /// Each one is a main-queue block that may take the terminal lock, so a
         /// large value relative to `frames` means callback amplification.
         public var mainHops: Int = 0
-        /// Main-queue blocks scheduled by the coalescing event queue (sync-end,
-        /// title, bell, buffer and mouse-mode notifications). At most one is
-        /// outstanding per view, so under a TUI frame flood this stays near the
-        /// drain rate while the posts it absorbed grow (IT-1075).
+        /// Main-queue blocks scheduled by the coalescing event queue (bell,
+        /// buffer, mouse-mode and program-status notifications). At most one is
+        /// outstanding per view (IT-1075). Sync-end and title changes do not
+        /// use the queue: the frame driver applies them at its next tick.
         public var coalescedMainHops: Int = 0
         /// Frames prepared and drawn on the render loop rather than on the main
         /// thread. Zero when no render loop is running.

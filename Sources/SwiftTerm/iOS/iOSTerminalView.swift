@@ -496,8 +496,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setupFrameDriver()
         frameDriver.setWindowAttachedOnMain(window != nil)
         eventQueue.configure(
-            onDrain: { [weak self] event, payload in
-                self?.applyTerminalEvent(event, payload: payload)
+            onDrain: { [weak self] event in
+                self?.applyTerminalEvent(event)
             },
             canDeliverInline: { [weak self] in
                 guard let self, let terminal = self.terminal else { return false }
@@ -3715,7 +3715,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     /// Applies one coalesced event. Main thread.
-    func applyTerminalEvent (_ event: TerminalEvent, payload: TerminalEventPayload) {
+    func applyTerminalEvent (_ event: TerminalEvent) {
         switch event {
         case .bufferActivated:
             resetManualScrollTracking()
@@ -3728,8 +3728,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             deliverBell()
         case .programStatusChanged:
             terminalDelegate?.programStatusChanged(source: self, records: programStatusRecords)
-        case .synchronizedOutputEnded, .titleChanged:
-            applyCoalescedPayloadEvent(event, payload: payload)
         }
     }
 
@@ -3832,8 +3830,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     nonisolated open func setTerminalTitle(source: Terminal, title: String) {
-        // Coalesced (IT-1075): see the Mac view.
-        eventQueue.postTitle(title)
+        // IT-1075, IT-2001 D2: a TUI spinner retitles every frame. Record only
+        // the latest title; the frame driver delivers it once, at its next
+        // tick (applyPendingViewUpdates), as it does the sync-end position.
+        crossThreadState.withLock { $0.pendingTitle = title }
+        frameSignal.requestViewUpdate()
     }
   
     nonisolated open func sizeChanged(source: Terminal) {
