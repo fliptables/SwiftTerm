@@ -338,12 +338,18 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
         guard let processAdapter, let process else { return }
         var size = getWindowSize()
         let previous = processAdapter.getWindowSize()
-        guard size.ws_row != previous.ws_row || size.ws_col != previous.ws_col ||
-              size.ws_xpixel != previous.ws_xpixel || size.ws_ypixel != previous.ws_ypixel else {
+        guard LocalProcessTerminalView.windowSizeShouldBeSent(size, previous: previous) else {
             return
         }
         processAdapter.updateWindowSize(size)
         _ = process.updateWindowSize(&size)
+    }
+
+    /// Whether `syncProcessWindowSizeIfNeeded()` sends `size` to the PTY
+    /// (IT-2001 D6): only a size that differs from the last one sent.
+    static func windowSizeShouldBeSent(_ size: winsize, previous: winsize) -> Bool {
+        return size.ws_row != previous.ws_row || size.ws_col != previous.ws_col ||
+            size.ws_xpixel != previous.ws_xpixel || size.ws_ypixel != previous.ws_ypixel
     }
 
     /**
