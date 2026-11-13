@@ -974,6 +974,24 @@ final class EscapeSequenceParser {
         data.extracting(range).withUnsafeBufferPointer { pendingSequenceBytes.append(contentsOf: $0) }
     }
 
+    /// The parse state kept between two feeds, one line per field, for the
+    /// D4 test that a fresh parser fed ``pendingSequenceBytes`` reaches the
+    /// same state (IT-2001). In ground state only the state is listed: every
+    /// sequence clears the accumulators on entry, so what they hold there is
+    /// never read. Not used by the replication code itself.
+    var replicationStateDescription: [String] {
+        var lines = ["state = \(currentState)"]
+        guard currentState != .ground else { return lines }
+        var pars = _pars
+        let parameters = pars.withView { Array($0) }
+        lines.append("osc = \(_osc) limit \(_oscLimitExceeded) ignoredPrefix \(_oscIgnoredPrefixBytes)")
+        lines.append("apc = \(_apc) limit \(_apcLimitExceeded)")
+        lines.append("pars = \(parameters) colonMask \(_parsColonMask) limit \(_parameterLimitExceeded)")
+        lines.append("collect = \(_collect)")
+        lines.append("dcsHandler = \(activeDcsHandler.map { String(describing: type(of: $0)) } ?? "none")")
+        return lines
+    }
+
     var logFileCounter = 1
     func dump (_ data: ArraySlice<UInt8>)
     {

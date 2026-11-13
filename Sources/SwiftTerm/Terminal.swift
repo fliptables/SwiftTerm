@@ -10913,6 +10913,8 @@ extension Terminal {
     var replicationAltBuffer: Buffer { get { altBuffer } set { altBuffer = newValue } }
     /// The active buffer. Set it to ``replicationNormalBuffer`` or ``replicationAltBuffer``.
     var replicationActiveBuffer: Buffer { get { _buffer } set { _buffer = newValue } }
+    /// The parser's state between feeds (tests only: the D4 every-cut pin).
+    var replicationParserState: [String] { parser.replicationStateDescription }
     var replicationKittyGraphicsActiveIsAlternate: Bool {
         get { kittyGraphicsState.activeIsAlternate }
         set { kittyGraphicsState.activeIsAlternate = newValue }

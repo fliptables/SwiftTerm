@@ -190,6 +190,15 @@ final class TerminalStateSnapshotTests {
         #expect(failure == nil, "\(name): \(failure ?? "")")
     }
 
+    /// IT-2001 D4: the parser hook's contract streams (ParserBoundaryTests),
+    /// end to end through the snapshot, cut at every byte.
+    @Test(arguments: ParserBoundaryTests.clauses.map(\.0))
+    func everyParserClauseCutReplicates(_ name: String) {
+        let bytes = ParserBoundaryTests.clauses.first { $0.0 == name }!.1
+        let failure = Self.replicate([.bytes(bytes)])
+        #expect(failure == nil, "\(name): \(failure ?? "")")
+    }
+
     /// Found by T3 on a recorded `less` session: a terminal made at 24 rows has an
     /// alternate buffer that holds 25 lines (it was built at the default 25), and its
     /// capacity decides when output starts trimming.
