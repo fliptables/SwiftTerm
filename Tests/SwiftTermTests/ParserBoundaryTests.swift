@@ -25,6 +25,7 @@ final class ParserBoundaryTests {
     private static func make(_ capture: Capture) -> Terminal {
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.synchronizedOutputTimeout = nil
+        terminal.recordsPendingParserBytes = true
         return terminal
     }
 

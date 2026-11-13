@@ -892,12 +892,21 @@ open class Terminal {
         parser.reset(self)
     }
 
+    /// The parser's own record of the open sequence (no putback), for the
+    /// IT-2001 D4 flag tests.
+    var parserRecordForTesting: [UInt8] { parser.pendingSequenceBytes }
+
     /// True when the parser holds input it has only partly read: an
     /// unfinished escape, control or string sequence, or the first bytes of a
     /// UTF-8 character. Read under `terminalLock`, between feeds.
     public var hasPendingSequence: Bool {
         parser.currentState != .ground || parser.pendingSequenceOverflowed
             || !readingBuffer.putbackBuffer.isEmpty
+    }
+
+    public var recordsPendingParserBytes: Bool {
+        get { parser.recordsPendingBytes }
+        set { parser.recordsPendingBytes = newValue }
     }
 
     /// The bytes the parser holds from an unfinished sequence, verbatim, so a

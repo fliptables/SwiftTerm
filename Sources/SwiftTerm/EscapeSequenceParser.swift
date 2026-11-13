@@ -525,6 +525,7 @@ final class EscapeSequenceParser {
     /// the open sequence verbatim; one larger than this (an image transfer)
     /// is reported as overflowed so the caller waits for it to finish.
     static let maximumPendingSequenceBytes = 256 * 1024
+    var recordsPendingBytes = false
 
     private var didResetDuringParse = false
     private var resetSerial = 0

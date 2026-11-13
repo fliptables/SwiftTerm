@@ -20,6 +20,7 @@ final class TerminalStateSnapshotTests {
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.respondsToQueries = responds
         terminal.synchronizedOutputTimeout = nil
+        terminal.recordsPendingParserBytes = true
         return terminal
     }
 

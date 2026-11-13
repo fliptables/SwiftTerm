@@ -18,6 +18,7 @@ final class ExportRefusalTests {
         let terminal = Terminal(delegate: Capture(), options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.respondsToQueries = responds
         terminal.synchronizedOutputTimeout = nil
+        terminal.recordsPendingParserBytes = true
         return terminal
     }
 

@@ -15,6 +15,7 @@ final class ReplicationPrimitivesTests {
         let capture = Capture()
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 40, rows: 10))
         terminal.respondsToQueries = respondsToQueries
+        terminal.recordsPendingParserBytes = true
         return (terminal, capture)
     }
 
