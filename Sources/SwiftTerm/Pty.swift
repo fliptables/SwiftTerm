@@ -115,6 +115,11 @@ public class PseudoTerminalHelpers {
         // allocatable fd NUMBERS: dup2/open to any number >= it fails EBADF
         // (empirically verified — see Scape
         // docs/spikes/2026-07-19-it301-fd-hygiene-fix-findings.md).
+        // On Linux (glibc and musl) getdtablesize() returns the RLIMIT_NOFILE
+        // soft limit, which is likewise the exclusive bound on fd numbers an
+        // open/dup can allocate; the same sample and floor apply. The Scape
+        // daemon is the parent of every session there, and is multithreaded
+        // (IT-2001 D5).
         // Precomputed in the parent because getdtablesize() is not among the
         // portable async-signal-safe functions; the child loop below must be
         // only close() + scalar arithmetic. Floor of OPEN_MAX (10240) guards
