@@ -395,11 +395,11 @@ open class Terminal {
     
     /// The current terminal columns (counting from 1)
     public var cols: Int { _cols }
-    var _cols: Int = 80
+    private(set) var _cols: Int = 80
     
     /// The current terminal rows (counting from 1)
     public var rows: Int { _rows }
-    var _rows: Int = 25
+    private(set) var _rows: Int = 25
     var tabStopWidth : Int = 8
     
     /// Terminal configuration options.
@@ -534,13 +534,13 @@ open class Terminal {
     }
 
     // The current buffers
-    let cellArena: CellArena
+    private let cellArena: CellArena
     var normalBuffer, altBuffer: Buffer
     /**
      * Returns the active buffer (either the normal buffer or the alternative buffer)
      */
     public var buffer: Buffer { _buffer }
-    var _buffer: Buffer
+    private(set) var _buffer: Buffer
 
     /// Controls whether primary pointer clicks are routed to an active OSC 133
     /// semantic prompt. Views use this when deciding whether a click should
@@ -615,16 +615,16 @@ open class Terminal {
     public var applicationCursor : Bool = false
 
     /// Whether DEC reverse-screen mode (DECSCNM) is active.
-    var reverseColors: Bool = false
+    private(set) var reverseColors: Bool = false
 
-    struct KeyboardModeState: Sendable {
+    private struct KeyboardModeState: Sendable {
         var flags: KittyKeyboardFlags = []
         var stack: [KittyKeyboardFlags] = []
     }
 
     private static let keyboardModeStackLimit = 16
-    var keyboardModeNormal = KeyboardModeState()
-    var keyboardModeAlt = KeyboardModeState()
+    private var keyboardModeNormal = KeyboardModeState()
+    private var keyboardModeAlt = KeyboardModeState()
 
     public var keyboardEnhancementFlags: KittyKeyboardFlags {
         let mode = isCurrentBufferAlternate ? keyboardModeAlt : keyboardModeNormal
@@ -637,7 +637,7 @@ open class Terminal {
 
     /// BiDi state that new paragraphs receive.
     public var currentBidiState: BidiPresentationState { _currentBidiState }
-    var _currentBidiState: BidiPresentationState = .default
+    private(set) var _currentBidiState: BidiPresentationState = .default
 
     /// True when left and right cursor keys follow the resolved paragraph
     /// direction. Hosts can change this while the terminal is running. A reset
@@ -650,7 +650,7 @@ open class Terminal {
     public var bidiRTLPreference: Bool { currentBidiState.fallbackDirection == .rightToLeft }
     public var bidiBoxMirroring: Bool { currentBidiState.boxMirroring }
 
-    var savedPrivateModes: [Int: Bool] = [:]
+    private var savedPrivateModes: [Int: Bool] = [:]
     var cursorHidden : Bool = false
     
     /// Controls the origin mode (DECOM), when set, the screen is limited to the top and bottom margins
@@ -683,7 +683,7 @@ open class Terminal {
 
     /// Indicates that the application has toggled bracketed paste mode, which means that when content is pasted into
     /// the terminal, the content will be wrapped in "ESC [ 200 ~" to start, and "ESC [ 201 ~" to end.
-    public internal(set) var bracketedPasteMode: Bool = false
+    public private(set) var bracketedPasteMode: Bool = false
 
     /// Tracks DECSET/DECRST private mode 1007 (Alternate Scroll Mode, xterm's "alternateScroll" resource).
     /// When true and the alternate screen buffer is active without an application mouse-tracking mode enabled,
@@ -693,21 +693,21 @@ open class Terminal {
     /// host view, which can read this property to decide how to route them.
     /// xterm's own default for this resource is false; we default to true here to match modern terminals
     /// (e.g. Ghostty) that enable it out of the box.
-    public internal(set) var alternateScrollMode: Bool = true
+    public private(set) var alternateScrollMode: Bool = true
     /// Whether the running application subscribed to unsolicited color-scheme updates with `CSI ? 2031 h`.
-    public internal(set) var colorSchemeUpdatesEnabled: Bool = false
+    public private(set) var colorSchemeUpdatesEnabled: Bool = false
 
     /// The light/dark preference represented by the current terminal palette, as reported to applications that
     /// query it (`CSI ? 996 n`). Defaults to `.dark`; hosts should call `updateColorScheme(_:)` once the initial
     /// palette is installed so a light terminal never reports the wrong preference.
-    public internal(set) var colorScheme: TerminalColorScheme = .dark
+    public private(set) var colorScheme: TerminalColorScheme = .dark
     
-    var charset: [UInt8:String]? = nil
-    var gCharsets: [[UInt8:String]?] = [CharSets.defaultCharset, nil, nil, nil]
+    private var charset: [UInt8:String]? = nil
+    private var gCharsets: [[UInt8:String]?] = [CharSets.defaultCharset, nil, nil, nil]
     var gcharset: Int = 0
     var reverseWraparound: Bool = false
     weak var tdel: TerminalDelegate?
-    var curAttr: Attribute = CharData.defaultAttr
+    private var curAttr: Attribute = CharData.defaultAttr
     /// Arena identifier for `curAttr`. It changes only when SGR state changes.
     private var curStyleID: UInt16 = 0
     /// Erase state derived from `curAttr`, cached at the same boundary.
@@ -788,12 +788,6 @@ open class Terminal {
         tdel?.send(source: self, data: data)
     }
 
-    /// Drops any partly read sequence before an imported state's pending
-    /// bytes are fed.
-    func resetParserForImport() {
-        parser.reset(self)
-    }
-
     /// Owns copied OSC observations independently of parser storage.
     private let oscEventDispatcher = TerminalOscEventDispatcher()
 
@@ -843,14 +837,14 @@ open class Terminal {
     /// contents are entirely under the control of the remote application, and require the terminal to be trusted
     /// (see the `isProcessTrusted` method in the `TerminalDelegate`).  When this is set the
     /// `hostCurrentDirectoryUpdated` method on the delegate is invoked.
-    public internal(set) var hostCurrentDirectory: String? = nil
+    public private(set) var hostCurrentDirectory: String? = nil
     
     /// This variable if set, contains an URI representing the host and current document of the process
     /// running in the terminal.   It might be nil, or might not be correct, the
     /// contents are entirely under the control of the remote application, and require the terminal to be trusted
     /// (see the `isProcessTrusted` method in the `TerminalDelegate`).  When this is set the
     /// `hostCurrentDocumentUpdated` method on the delegate is invoked.
-    public internal(set) var hostCurrentDocument: String? = nil
+    public private(set) var hostCurrentDocument: String? = nil
     
     /// The current attribute used by the terminal by default
     public var currentAttribute: Attribute {
@@ -860,7 +854,7 @@ open class Terminal {
     /// Updates the public attribute value and its internal packed forms once.
     /// Print and scroll paths consume the identifiers directly.
     @inline(__always)
-    func setCurrentAttribute(_ attribute: Attribute) {
+    private func setCurrentAttribute(_ attribute: Attribute) {
         guard attribute != curAttr else { return }
 
         let styleID = cellArena.intern(attribute: attribute)
@@ -922,7 +916,7 @@ open class Terminal {
     }
     
     // The protocol encoding for the terminal
-    var mouseProtocol: MouseProtocolEncoding = .x10
+    private var mouseProtocol: MouseProtocolEncoding = .x10
 
     // This is used to track if we are setting the colors, to prevent a
     // recursive invocation (nativeForegroundColor sets the terminal
@@ -1073,7 +1067,7 @@ open class Terminal {
         }
     }
     
-    public internal(set) var mouseMode: MouseMode = .off {
+    public private(set) var mouseMode: MouseMode = .off {
         didSet {
             tdel?.mouseModeChanged (source: self)
         }
@@ -1107,7 +1101,7 @@ open class Terminal {
 
     /// Whether the running application has requested shift capture via XTSHIFTESCAPE (`CSI > 1 s`).
     /// When `true`, shift+click is forwarded to the app instead of triggering local text selection.
-    public internal(set) var mouseShiftCapture: Bool = false
+    public private(set) var mouseShiftCapture: Bool = false
 
     // The next four variables determine whether setting/querying should be done using utf8 or latin1
     // and whether the values should be set or queried using hex digits, rather than actual byte streams
@@ -3541,13 +3535,13 @@ open class Terminal {
         }
     }
 
-    enum ActiveHyperlink {
+    private enum ActiveHyperlink {
         case pending(String)
         case resolved(TinyAtom)
         case unavailable
     }
 
-    var activeHyperlink: ActiveHyperlink? = nil
+    private var activeHyperlink: ActiveHyperlink? = nil
     private var payloadCodes = Set<UInt16>()
 
     private func resolveActiveHyperlink() -> TinyAtom? {
@@ -8201,7 +8195,7 @@ open class Terminal {
     // Mirrors ghostty: flip a flag and record a watchdog update. The view layer
     // pauses rendering while the flag is set (see updateDisplay's early-return).
     // The live buffer is mutated normally; no snapshot is taken.
-    func beginSynchronizedOutput ()
+    private func beginSynchronizedOutput ()
     {
         let wasActive = synchronizedOutputActive
         synchronizedOutputActive = true
@@ -8215,7 +8209,7 @@ open class Terminal {
         }
     }
 
-    func endSynchronizedOutput ()
+    private func endSynchronizedOutput ()
     {
         guard synchronizedOutputActive else {
             return
@@ -9449,16 +9443,16 @@ open class Terminal {
     // they do not move the offsets the parse and render paths touch.
 
     /// Whether the running application subscribed to terminal visibility reports.
-    public internal(set) var visibilityReportsEnabled: Bool = false
+    public private(set) var visibilityReportsEnabled: Bool = false
 
     /// The host-owned visibility state. RIS preserves this value.
     public private(set) var reportedVisibility: TerminalVisibility = .potentiallyVisible
 
     /// Whether the running application subscribed to in-band size reports.
-    public internal(set) var inBandSizeReportsEnabled: Bool = false
+    public private(set) var inBandSizeReportsEnabled: Bool = false
 
     /// Whether DEC private mode 5522 is stored as set.
-    public internal(set) var kittyPasteEventsEnabled: Bool = false
+    public private(set) var kittyPasteEventsEnabled: Bool = false
 
     /// The last complete pixel layout committed by the host. RIS preserves this value.
     public private(set) var pixelGeometry: TerminalPixelGeometry?
@@ -9697,4 +9691,129 @@ public extension TerminalDelegate {
 
     func createImage (source: Terminal, data: Data, width: ImageSizeRequest, height: ImageSizeRequest, preserveAspectRatio: Bool) {
     }    
+}
+
+// MARK: - Replication accessors (IT-2001 D3)
+//
+// The only surface of `Terminal` that the replication files
+// (`TerminalStateSnapshot.swift`, `TerminalStateSnapshotCoding.swift`,
+// `TerminalHistoryStreaming.swift`, `TerminalReplicationDigest.swift`) use,
+// besides public API. Each member forwards to one stored property or method
+// and adds no logic, so the private state keeps its upstream access level and
+// an upstream change to that state shows up here, in one block, at a merge.
+// Call every one of them under `terminalLock`, between feeds.
+extension Terminal {
+    // Grid and buffers
+    var replicationCols: Int { get { _cols } set { _cols = newValue } }
+    var replicationRows: Int { get { _rows } set { _rows = newValue } }
+    var replicationTabStopWidth: Int { get { tabStopWidth } set { tabStopWidth = newValue } }
+    var replicationCellArena: CellArena { cellArena }
+    var replicationNormalBuffer: Buffer { get { normalBuffer } set { normalBuffer = newValue } }
+    var replicationAltBuffer: Buffer { get { altBuffer } set { altBuffer = newValue } }
+    /// The active buffer. Set it to ``replicationNormalBuffer`` or ``replicationAltBuffer``.
+    var replicationActiveBuffer: Buffer { get { _buffer } set { _buffer = newValue } }
+    var replicationKittyGraphicsActiveIsAlternate: Bool {
+        get { kittyGraphicsState.activeIsAlternate }
+        set { kittyGraphicsState.activeIsAlternate = newValue }
+    }
+
+    // Modes
+    var replicationApplicationKeypad: Bool { get { applicationKeypad } set { applicationKeypad = newValue } }
+    var replicationReverseColors: Bool { get { reverseColors } set { reverseColors = newValue } }
+    var replicationKeyboardModeNormal: (flags: KittyKeyboardFlags, stack: [KittyKeyboardFlags]) {
+        get { (keyboardModeNormal.flags, keyboardModeNormal.stack) }
+        set { keyboardModeNormal = KeyboardModeState(flags: newValue.flags, stack: newValue.stack) }
+    }
+    var replicationKeyboardModeAlt: (flags: KittyKeyboardFlags, stack: [KittyKeyboardFlags]) {
+        get { (keyboardModeAlt.flags, keyboardModeAlt.stack) }
+        set { keyboardModeAlt = KeyboardModeState(flags: newValue.flags, stack: newValue.stack) }
+    }
+    var replicationSendFocus: Bool { get { sendFocus } set { sendFocus = newValue } }
+    var replicationCurrentBidiState: BidiPresentationState {
+        get { _currentBidiState } set { _currentBidiState = newValue }
+    }
+    var replicationSavedPrivateModes: [Int: Bool] { get { savedPrivateModes } set { savedPrivateModes = newValue } }
+    var replicationCursorHidden: Bool { get { cursorHidden } set { cursorHidden = newValue } }
+    var replicationOriginMode: Bool { get { originMode } set { originMode = newValue } }
+    var replicationMarginMode: Bool { get { marginMode } set { marginMode = newValue } }
+    var replicationInsertMode: Bool { get { insertMode } set { insertMode = newValue } }
+    var replicationWraparound: Bool { get { wraparound } set { wraparound = newValue } }
+    var replicationReverseWraparound: Bool { get { reverseWraparound } set { reverseWraparound = newValue } }
+    var replicationBracketedPasteMode: Bool { get { bracketedPasteMode } set { bracketedPasteMode = newValue } }
+    var replicationAlternateScrollMode: Bool { get { alternateScrollMode } set { alternateScrollMode = newValue } }
+    var replicationColorSchemeUpdatesEnabled: Bool {
+        get { colorSchemeUpdatesEnabled } set { colorSchemeUpdatesEnabled = newValue }
+    }
+    var replicationColorScheme: TerminalColorScheme { get { colorScheme } set { colorScheme = newValue } }
+    var replicationGLevel: UInt8 { get { gLevel } set { gLevel = newValue } }
+    var replicationCursorBlink: Bool { get { cursorBlink } set { cursorBlink = newValue } }
+    var replicationAllow80To132: Bool { get { allow80To132 } set { allow80To132 = newValue } }
+    var replicationLineFeedMode: Bool { get { lineFeedMode } set { lineFeedMode = newValue } }
+    var replicationSmoothScroll: Bool { get { smoothScroll } set { smoothScroll = newValue } }
+    var replicationSend8bit: Bool { get { cc.send8bit } set { cc.send8bit = newValue } }
+    var replicationMouseProtocol: MouseProtocolEncoding { get { mouseProtocol } set { mouseProtocol = newValue } }
+    var replicationMouseMode: MouseMode { get { mouseMode } set { mouseMode = newValue } }
+    var replicationMouseShiftCapture: Bool { get { mouseShiftCapture } set { mouseShiftCapture = newValue } }
+    var replicationXtermTitleSetUtf: Bool { get { xtermTitleSetUtf } set { xtermTitleSetUtf = newValue } }
+    var replicationXtermTitleSetHex: Bool { get { xtermTitleSetHex } set { xtermTitleSetHex = newValue } }
+    var replicationXtermTitleQueryUtf: Bool { get { xtermTitleQueryUtf } set { xtermTitleQueryUtf = newValue } }
+    var replicationXtermTitleQueryHex: Bool { get { xtermTitleQueryHex } set { xtermTitleQueryHex = newValue } }
+    var replicationConformance: TerminalConformance { get { conformance } set { conformance = newValue } }
+    var replicationVisibilityReportsEnabled: Bool {
+        get { visibilityReportsEnabled } set { visibilityReportsEnabled = newValue }
+    }
+    var replicationInBandSizeReportsEnabled: Bool {
+        get { inBandSizeReportsEnabled } set { inBandSizeReportsEnabled = newValue }
+    }
+    var replicationKittyPasteEventsEnabled: Bool {
+        get { kittyPasteEventsEnabled } set { kittyPasteEventsEnabled = newValue }
+    }
+
+    // Character sets and attributes
+    var replicationCharset: [UInt8: String]? { get { charset } set { charset = newValue } }
+    var replicationGCharsets: [[UInt8: String]?] { get { gCharsets } set { gCharsets = newValue } }
+    var replicationGCharset: Int { get { gcharset } set { gcharset = newValue } }
+    /// Read the attribute with the public ``currentAttribute``.
+    func replicationSetCurrentAttribute(_ attribute: Attribute) { setCurrentAttribute(attribute) }
+    var replicationAnsiColors: [Color] { get { ansiColors } set { ansiColors = newValue } }
+    var replicationDefaultAnsiColors: [Color] { defaultAnsiColors }
+
+    /// The active OSC 8 hyperlink: `nil` none; `.some(nil)` unavailable (its
+    /// atom could not be made); `.some(target)` open, whether or not its atom
+    /// was made yet. Setting an open target leaves it to be resolved on the
+    /// next print, as an OSC 8 does.
+    var replicationActiveHyperlinkTarget: String?? {
+        switch activeHyperlink {
+        case nil: return nil
+        case .pending(let payload): return .some(payload)
+        case .resolved(let atom): return .some(atom.target as? String ?? "")
+        case .unavailable: return .some(nil)
+        }
+    }
+    func replicationSetActiveHyperlink(_ target: String??) {
+        switch target {
+        case nil: activeHyperlink = nil
+        case .some(nil): activeHyperlink = .unavailable
+        case .some(.some(let payload)): activeHyperlink = .pending(payload)
+        }
+    }
+
+    // Host-visible strings
+    var replicationHostCurrentDirectory: String? {
+        get { hostCurrentDirectory } set { hostCurrentDirectory = newValue }
+    }
+    var replicationHostCurrentDocument: String? {
+        get { hostCurrentDocument } set { hostCurrentDocument = newValue }
+    }
+    var replicationTerminalTitle: String { get { terminalTitle } set { terminalTitle = newValue } }
+    var replicationIconTitle: String { get { iconTitle } set { iconTitle = newValue } }
+    var replicationTerminalTitleStack: [String] { get { terminalTitleStack } set { terminalTitleStack = newValue } }
+    var replicationTerminalIconStack: [String] { get { terminalIconStack } set { terminalIconStack = newValue } }
+
+    // Operations
+    /// Drops any partly read sequence before an imported state's pending bytes are fed.
+    func replicationResetParser() { parser.reset(self) }
+    func replicationBeginSynchronizedOutput() { beginSynchronizedOutput() }
+    func replicationEndSynchronizedOutput() { endSynchronizedOutput() }
+    func replicationNotifyBufferActivated() { tdel?.bufferActivated(source: self) }
 }

@@ -92,19 +92,19 @@ extension Terminal {
     /// packed copy of each history line.
     public func exportForStreaming() -> TerminalStreamingExport {
         let screen = exportState(skippingHistory: true)
-        let arena = cellArena.snapshotCopy()
+        let arena = replicationCellArena.snapshotCopy()
         var history: [(isAlternate: Bool, cols: Int, rows: Int, lines: [BufferLine], promptRow: Int?)] = []
-        for (isAlternate, buffer) in [(false, normalBuffer), (true, altBuffer)] {
-            let count = min(buffer.yBase, buffer.lines.count)
+        for (isAlternate, buffer) in [(false, replicationNormalBuffer), (true, replicationAltBuffer)] {
+            let count = min(buffer.replicationYBase, buffer.replicationLines.count)
             guard count > 0 else { continue }
             var copies: [BufferLine] = []
             copies.reserveCapacity(count)
-            for index in 0..<count { copies.append(buffer.lines[index].replicationCopy(arena: arena)) }
+            for index in 0..<count { copies.append(buffer.replicationLines[index].replicationCopy(arena: arena)) }
             var promptRow: Int? = nil
-            if let start = buffer.semanticPromptStartLine, let row = buffer.absoluteRow(of: start), row < count {
+            if let start = buffer.replicationSemanticPromptStartLine, let row = buffer.replicationAbsoluteRow(of: start), row < count {
                 promptRow = row
             }
-            history.append((isAlternate, buffer.cols, buffer.rows, copies, promptRow))
+            history.append((isAlternate, buffer.replicationCols, buffer.replicationRows, copies, promptRow))
         }
         return TerminalStreamingExport(screen: screen, arena: arena, history: history)
     }
@@ -116,25 +116,25 @@ extension Terminal {
     /// was exported at; the host must then resend the history. Call under `terminalLock`.
     @discardableResult
     public func importHistoryChunk(_ chunk: TerminalHistoryChunk) -> Bool {
-        let buffer = chunk.isAlternateBuffer ? altBuffer : normalBuffer
-        guard buffer.cols == chunk.bufferCols, buffer.rows == chunk.bufferRows else { return false }
+        let buffer = chunk.isAlternateBuffer ? replicationAltBuffer : replicationNormalBuffer
+        guard buffer.replicationCols == chunk.bufferCols, buffer.replicationRows == chunk.bufferRows else { return false }
         var payloads: [String: TinyAtom] = [:]
-        let lines = chunk.lines.map { makeImportedLine($0, arena: buffer.cellArena, payloads: &payloads) }
+        let lines = chunk.lines.map { makeImportedLine($0, arena: buffer.replicationCellArena, payloads: &payloads) }
         guard !lines.isEmpty else { return true }
-        let capacity = buffer.lines.maxLength
-        let kept = max(0, min(lines.count, capacity - buffer.lines.count))
+        let capacity = buffer.replicationLines.maxLength
+        let kept = max(0, min(lines.count, capacity - buffer.replicationLines.count))
         let trimmed = lines.count - kept
         if kept > 0 {
-            buffer.lines.splice(start: 0, deleteCount: 0, items: Array(lines[trimmed...]), change: { _ in })
+            buffer.replicationLines.splice(start: 0, deleteCount: 0, items: Array(lines[trimmed...]), change: { _ in })
         }
-        buffer.linesTop += trimmed
-        buffer.yBase += kept
+        buffer.replicationLinesTop += trimmed
+        buffer.replicationYBase += kept
         buffer.yDisp += kept
         if let row = chunk.semanticPromptStartRow, row >= trimmed {
-            buffer.semanticPromptStartLine = lines[row]
-            buffer.semanticPromptStartRowCache = row - trimmed
-        } else if buffer.semanticPromptStartLine != nil {
-            buffer.semanticPromptStartRowCache += kept
+            buffer.replicationSemanticPromptStartLine = lines[row]
+            buffer.replicationSemanticPromptStartRowCache = row - trimmed
+        } else if buffer.replicationSemanticPromptStartLine != nil {
+            buffer.replicationSemanticPromptStartRowCache += kept
         }
         refresh(startRow: 0, endRow: rows - 1)
         return true

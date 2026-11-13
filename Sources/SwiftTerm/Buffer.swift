@@ -313,9 +313,9 @@ public final class Buffer {
         line.owningBufferRef = selfRef
     }
     
-    private(set) var insertMode: Bool = false
-    private(set) var marginMode: Bool = false
-    private(set) var wraparound: Bool = false
+    private var insertMode: Bool = false
+    private var marginMode: Bool = false
+    private var wraparound: Bool = false
 
     // OSC 133 state belongs to a buffer so switching to the alternate screen
     // cannot leak an in-progress shell prompt into the normal screen.
@@ -332,8 +332,8 @@ public final class Buffer {
     // mark, plus a cached row index. No scroll, splice, margin, trim, or
     // reflow path knows this cache exists: the read path revalidates with
     // one pointer compare and rescans outward when the line moved.
-    var semanticPromptStartLine: BufferLine?
-    var semanticPromptStartRowCache = 0
+    private var semanticPromptStartLine: BufferLine?
+    private var semanticPromptStartRowCache = 0
     private(set) var semanticPromptRowScanCount = 0
 
     // A monotonic prompt-group counter. `beginSemanticPromptGroup` advances it;
@@ -341,8 +341,8 @@ public final class Buffer {
     // stamped with the current value, and R5 derivation follows a hard link
     // only when the epochs agree — that is what isolates a new prompt from an
     // old group's stranded continuation rows.
-    var semanticGroupCounter: UInt64 = 0
-    var activeSemanticGroupID: UInt64 = 0
+    private var semanticGroupCounter: UInt64 = 0
+    private(set) var activeSemanticGroupID: UInt64 = 0
 
     var semanticPromptStartRow: Int? {
         guard let startLine = semanticPromptStartLine else { return nil }
@@ -1905,4 +1905,69 @@ public final class Buffer {
             print ("[\(istr):\(cstr)]\(flag)\(yb) \(debugBuffer._lines.getArray() [y].debugDescription)")
         }
     }    
+}
+
+// MARK: - Replication accessors (IT-2001 D3)
+//
+// The only surface of `Buffer` that the replication files use, besides public
+// API (see the same block in `Terminal.swift`). Each member forwards to one
+// stored property or method and adds no logic.
+extension Buffer {
+    /// Creates an empty buffer that shares the terminal's cell arena.
+    static func replicationMake(cols: Int, rows: Int, tabStopWidth: Int, scrollback: Int?,
+                                bidiState: BidiPresentationState, arena: CellArena) -> Buffer {
+        Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: scrollback,
+               bidiState: bidiState, arena: arena)
+    }
+    var replicationTerminal: Terminal! { get { terminal } set { terminal = newValue } }
+    var replicationCellArena: CellArena { cellArena }
+    var replicationLines: CircularBufferLineList { _read { yield _lines } }
+    var replicationCols: Int { cols }
+    var replicationRows: Int { rows }
+    var replicationScrollback: Int? { scrollback }
+    var replicationDefaultBidiState: BidiPresentationState { defaultBidiState }
+    func replicationAbsoluteRow(of line: BufferLine) -> Int? { absoluteRow(of: line) }
+
+    // Scroll position and margins not covered by public API
+    var replicationYBase: Int { get { yBase } set { yBase = newValue } }
+    var replicationXDisp: Int { get { xDisp } set { xDisp = newValue } }
+    var replicationXBase: Int { get { xBase } set { xBase = newValue } }
+    var replicationLinesTop: Int { get { linesTop } set { linesTop = newValue } }
+    var replicationTabStops: [Bool] { get { tabStops } set { tabStops = newValue } }
+
+    // Saved cursor (DECSC) not covered by public API
+    var replicationSavedOriginMode: Bool { get { savedOriginMode } set { savedOriginMode = newValue } }
+    var replicationSavedMarginMode: Bool { get { savedMarginMode } set { savedMarginMode = newValue } }
+    var replicationSavedWraparound: Bool { get { savedWraparound } set { savedWraparound = newValue } }
+    var replicationSavedReverseWraparound: Bool {
+        get { savedReverseWraparound } set { savedReverseWraparound = newValue }
+    }
+
+    // Modes: read here, written through the existing setters
+    var replicationInsertMode: Bool { insertMode }
+    var replicationMarginMode: Bool { marginMode }
+    var replicationWraparound: Bool { wraparound }
+    func replicationSetInsertMode(_ value: Bool) { setInsertMode(value) }
+    func replicationSetMarginMode(_ value: Bool) { setMarginMode(value) }
+    func replicationSetWraparound(_ value: Bool) { setWraparound(value) }
+
+    // OSC 133 state
+    var replicationSemanticContent: SemanticContent { get { semanticContent } set { semanticContent = newValue } }
+    var replicationSemanticInput: SemanticInputState { get { semanticInput } set { semanticInput = newValue } }
+    var replicationSemanticClickMode: SemanticPromptClickMode {
+        get { semanticClickMode } set { semanticClickMode = newValue }
+    }
+    var replicationSemanticUsesSpecialCursorKeys: Bool {
+        get { semanticUsesSpecialCursorKeys } set { semanticUsesSpecialCursorKeys = newValue }
+    }
+    var replicationSemanticPromptStartLine: BufferLine? {
+        get { semanticPromptStartLine } set { semanticPromptStartLine = newValue }
+    }
+    var replicationSemanticPromptStartRowCache: Int {
+        get { semanticPromptStartRowCache } set { semanticPromptStartRowCache = newValue }
+    }
+    var replicationSemanticGroupCounter: UInt64 { get { semanticGroupCounter } set { semanticGroupCounter = newValue } }
+    var replicationActiveSemanticGroupID: UInt64 {
+        get { activeSemanticGroupID } set { activeSemanticGroupID = newValue }
+    }
 }

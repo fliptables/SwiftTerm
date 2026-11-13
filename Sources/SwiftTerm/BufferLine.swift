@@ -178,32 +178,6 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// contents (cells, isWrapped, renderMode, images). Renderers that cache per-line
     /// draw state can compare this counter against a cached value to detect in-place
     /// changes without diffing individual cells.
-    /// The written prefix length; every cell after it is the tail blank.
-    var replicationUsedLength: Int { usedLength }
-    /// The attribute of the blank that fills the line after its written prefix.
-    var replicationTailAttribute: Attribute { storage.arena.attribute(for: tailBlankCell) }
-    /// Writes an imported line's prefix of packed cells (owned by this line's arena) in one
-    /// pass, with one change bump.
-    func replicationWritePacked(_ cells: [PackedCell]) {
-        let count = min(cells.count, storage.count)
-        for index in 0..<count { storage.setRawCell(cells[index], at: index) }
-        if count > 0 { noteWritten(upTo: count) }
-        bump()
-    }
-
-    /// Copies a line into a snapshot arena under the terminal lock, keeping the replication
-    /// metadata `copyForSnapshot` drops (semantic marks and the hard-continuation group).
-    func replicationCopy(arena snapshotArena: CellArena) -> BufferLine {
-        let copy = BufferLine(cols: count, arena: snapshotArena)
-        copy.copyForSnapshot(from: self, arena: snapshotArena)
-        copy.semanticMarks = semanticMarks
-        copy.semanticHardContinuationGroup = semanticHardContinuationGroup
-        return copy
-    }
-
-    /// Restores the OSC 133 marks of an imported line.
-    func replicationSetSemanticMarks(_ marks: [SemanticMark]) { semanticMarks = marks }
-
     public var generation: UInt64 { _generation }
     private(set) var _generation: UInt64 = 0
 
@@ -1024,5 +998,53 @@ public final class BufferLine: CustomDebugStringConvertible {
         get {
             translateToString()
         }
+    }
+}
+
+// MARK: - Replication accessors (IT-2001 D3)
+//
+// The only surface of `BufferLine` that the replication files use, besides
+// public API (see the same block in `Terminal.swift`). The first five are the
+// replication members S2.1 added, moved here unchanged; the rest forward to
+// one stored property or initializer.
+extension BufferLine {
+    /// The written prefix length; every cell after it is the tail blank.
+    var replicationUsedLength: Int { usedLength }
+    /// The attribute of the blank that fills the line after its written prefix.
+    var replicationTailAttribute: Attribute { storage.arena.attribute(for: tailBlankCell) }
+    /// Writes an imported line's prefix of packed cells (owned by this line's arena) in one
+    /// pass, with one change bump.
+    func replicationWritePacked(_ cells: [PackedCell]) {
+        let count = min(cells.count, storage.count)
+        for index in 0..<count { storage.setRawCell(cells[index], at: index) }
+        if count > 0 { noteWritten(upTo: count) }
+        bump()
+    }
+
+    /// Copies a line into a snapshot arena under the terminal lock, keeping the replication
+    /// metadata `copyForSnapshot` drops (semantic marks and the hard-continuation group).
+    func replicationCopy(arena snapshotArena: CellArena) -> BufferLine {
+        let copy = BufferLine(cols: count, arena: snapshotArena)
+        copy.copyForSnapshot(from: self, arena: snapshotArena)
+        copy.semanticMarks = semanticMarks
+        copy.semanticHardContinuationGroup = semanticHardContinuationGroup
+        return copy
+    }
+
+    /// Restores the OSC 133 marks of an imported line.
+    func replicationSetSemanticMarks(_ marks: [SemanticMark]) { semanticMarks = marks }
+
+    /// Creates a line filled with `packedFill`, whose cells after the written prefix are
+    /// `blankTailCell`.
+    static func replicationMake(cols: Int, packedFill: PackedCell, blankTailCell: PackedCell?,
+                                isWrapped: Bool, bidiState: BidiPresentationState,
+                                arena: CellArena) -> BufferLine {
+        BufferLine(cols: cols, packedFill: packedFill, blankTailCell: blankTailCell,
+                   isWrapped: isWrapped, bidiState: bidiState, arena: arena)
+    }
+    var replicationRenderMode: RenderLineMode { get { renderMode } set { renderMode = newValue } }
+    var replicationSemanticMarks: [SemanticMark] { semanticMarks }
+    var replicationSemanticHardContinuationGroup: UInt64? {
+        get { semanticHardContinuationGroup } set { semanticHardContinuationGroup = newValue }
     }
 }
