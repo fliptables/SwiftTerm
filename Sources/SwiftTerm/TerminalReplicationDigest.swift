@@ -111,8 +111,8 @@ extension Terminal {
         // cell costs a table lookup instead of a reflective description; two states with equal
         // cells number their attributes identically.
         var attributes = DigestAttributes()
-        Terminal.digest(buffer: normalBuffer, name: "normal", attributes: &attributes, into: &out)
-        Terminal.digest(buffer: altBuffer, name: "alt", attributes: &attributes, into: &out)
+        Terminal.digest(buffer: replicationNormalBuffer, name: "normal", attributes: &attributes, into: &out)
+        Terminal.digest(buffer: replicationAltBuffer, name: "alt", attributes: &attributes, into: &out)
         for (index, attribute) in attributes.list.enumerated() {
             out.append("attribute[\(index)] = \(attribute)")
         }
@@ -120,11 +120,10 @@ extension Terminal {
     }
 
     private func describeActiveHyperlink() -> String {
-        switch activeHyperlink {
+        switch replicationActiveHyperlinkTarget {
         case nil: return "none"
-        case .pending(let payload): return "open(\(payload))"
-        case .resolved(let atom): return "open(\(atom.target as? String ?? "?"))"
-        case .unavailable: return "unavailable"
+        case .some(.some(let target)): return "open(\(target))"
+        case .some(nil): return "unavailable"
         }
     }
 
@@ -134,12 +133,12 @@ extension Terminal {
             guard let label = child.label, digestExcludedBufferProperties[label] == nil else { continue }
             out.append("\(name).\(label) = \(DigestDescriber.describe(child.value))")
         }
-        let startRow = buffer.semanticPromptStartLine.flatMap { buffer.absoluteRow(of: $0) }
+        let startRow = buffer.replicationSemanticPromptStartLine.flatMap { buffer.replicationAbsoluteRow(of: $0) }
         out.append("\(name).semanticPromptStartRow = \(startRow.map(String.init) ?? "nil")")
-        out.append("\(name).lines.count = \(buffer.lines.count)")
-        out.append("\(name).lines.capacity = \(buffer.lines.maxLength)")
-        for row in 0..<buffer.lines.count {
-            let line = buffer.lines[row]
+        out.append("\(name).lines.count = \(buffer.replicationLines.count)")
+        out.append("\(name).lines.capacity = \(buffer.replicationLines.maxLength)")
+        for row in 0..<buffer.replicationLines.count {
+            let line = buffer.replicationLines[row]
             var parts: [String] = []
             for child in Mirror(reflecting: line).children {
                 guard let label = child.label, digestExcludedLineProperties[label] == nil else { continue }

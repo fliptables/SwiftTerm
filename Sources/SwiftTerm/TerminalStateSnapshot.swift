@@ -244,61 +244,61 @@ extension Terminal {
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
             altActive: isCurrentBufferAlternate,
-            tabStopWidth: tabStopWidth,
+            tabStopWidth: replicationTabStopWidth,
             cursorStyle: options.cursorStyle,
             synchronizedOutputActive: synchronizedOutputActive,
-            applicationKeypad: applicationKeypad,
+            applicationKeypad: replicationApplicationKeypad,
             applicationCursor: applicationCursor,
-            reverseColors: reverseColors,
-            kittyNormal: KittyKeyboardImage(flags: keyboardModeNormal.flags.rawValue,
-                                            stack: keyboardModeNormal.stack.map { $0.rawValue }),
-            kittyAlt: KittyKeyboardImage(flags: keyboardModeAlt.flags.rawValue,
-                                         stack: keyboardModeAlt.stack.map { $0.rawValue }),
-            sendFocus: sendFocus,
-            currentBidiState: _currentBidiState,
+            reverseColors: replicationReverseColors,
+            kittyNormal: KittyKeyboardImage(flags: replicationKeyboardModeNormal.flags.rawValue,
+                                            stack: replicationKeyboardModeNormal.stack.map { $0.rawValue }),
+            kittyAlt: KittyKeyboardImage(flags: replicationKeyboardModeAlt.flags.rawValue,
+                                         stack: replicationKeyboardModeAlt.stack.map { $0.rawValue }),
+            sendFocus: replicationSendFocus,
+            currentBidiState: replicationCurrentBidiState,
             bidiArrowKeySwap: bidiArrowKeySwap,
-            savedPrivateModes: savedPrivateModes,
-            cursorHidden: cursorHidden,
-            originMode: originMode,
-            marginMode: marginMode,
-            insertMode: insertMode,
-            wraparound: wraparound,
+            savedPrivateModes: replicationSavedPrivateModes,
+            cursorHidden: replicationCursorHidden,
+            originMode: replicationOriginMode,
+            marginMode: replicationMarginMode,
+            insertMode: replicationInsertMode,
+            wraparound: replicationWraparound,
             bracketedPasteMode: bracketedPasteMode,
             alternateScrollMode: alternateScrollMode,
             colorSchemeUpdatesEnabled: colorSchemeUpdatesEnabled,
             colorSchemeIsLight: colorScheme == .light,
-            charset: charset,
-            gCharsets: gCharsets,
-            gcharset: gcharset,
-            reverseWraparound: reverseWraparound,
-            currentAttribute: curAttr,
-            gLevel: gLevel,
-            cursorBlink: cursorBlink,
-            allow80To132: allow80To132,
-            lineFeedMode: lineFeedMode,
-            smoothScroll: smoothScroll,
+            charset: replicationCharset,
+            gCharsets: replicationGCharsets,
+            gcharset: replicationGCharset,
+            reverseWraparound: replicationReverseWraparound,
+            currentAttribute: currentAttribute,
+            gLevel: replicationGLevel,
+            cursorBlink: replicationCursorBlink,
+            allow80To132: replicationAllow80To132,
+            lineFeedMode: replicationLineFeedMode,
+            smoothScroll: replicationSmoothScroll,
             paletteOverrides: paletteOverrides(),
-            send8bit: cc.send8bit,
+            send8bit: replicationSend8bit,
             hostCurrentDirectory: hostCurrentDirectory,
             hostCurrentDocument: hostCurrentDocument,
-            mouseProtocol: mouseProtocol,
+            mouseProtocol: replicationMouseProtocol,
             mouseMode: mouseMode,
             mouseShiftCapture: mouseShiftCapture,
-            xtermTitleSetUtf: xtermTitleSetUtf,
-            xtermTitleSetHex: xtermTitleSetHex,
-            xtermTitleQueryUtf: xtermTitleQueryUtf,
-            xtermTitleQueryHex: xtermTitleQueryHex,
-            conformance: conformance,
+            xtermTitleSetUtf: replicationXtermTitleSetUtf,
+            xtermTitleSetHex: replicationXtermTitleSetHex,
+            xtermTitleQueryUtf: replicationXtermTitleQueryUtf,
+            xtermTitleQueryHex: replicationXtermTitleQueryHex,
+            conformance: replicationConformance,
             activeHyperlink: activeHyperlinkImage(),
-            terminalTitle: terminalTitle,
-            iconTitle: iconTitle,
-            terminalTitleStack: terminalTitleStack,
-            terminalIconStack: terminalIconStack,
+            terminalTitle: replicationTerminalTitle,
+            iconTitle: replicationIconTitle,
+            terminalTitleStack: replicationTerminalTitleStack,
+            terminalIconStack: replicationTerminalIconStack,
             visibilityReportsEnabled: visibilityReportsEnabled,
             inBandSizeReportsEnabled: inBandSizeReportsEnabled,
             kittyPasteEventsEnabled: kittyPasteEventsEnabled)
-        let normalImage = Terminal.bufferImage(normalBuffer, dropped: &dropped, skippingHistory: skippingHistory)
-        let altImage = Terminal.bufferImage(altBuffer, dropped: &dropped, skippingHistory: skippingHistory)
+        let normalImage = Terminal.bufferImage(replicationNormalBuffer, dropped: &dropped, skippingHistory: skippingHistory)
+        let altImage = Terminal.bufferImage(replicationAltBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
             pendingParserBytes: pendingParserBytes ?? [],
@@ -307,6 +307,8 @@ extension Terminal {
 
     private func paletteOverrides() -> [Int: RGB16] {
         var result: [Int: RGB16] = [:]
+        let ansiColors = replicationAnsiColors
+        let defaultAnsiColors = replicationDefaultAnsiColors
         for index in 0..<min(ansiColors.count, defaultAnsiColors.count)
         where ansiColors[index] != defaultAnsiColors[index] {
             let color = ansiColors[index]
@@ -316,51 +318,50 @@ extension Terminal {
     }
 
     private func activeHyperlinkImage() -> HyperlinkImage {
-        switch activeHyperlink {
+        switch replicationActiveHyperlinkTarget {
         case nil: return .none
-        case .pending(let payload): return .open(payload)
-        case .resolved(let atom): return .open(atom.target as? String ?? "")
-        case .unavailable: return .unavailable
+        case .some(.some(let target)): return .open(target)
+        case .some(nil): return .unavailable
         }
     }
 
     static func bufferImage(_ buffer: Buffer, dropped: inout Int, skippingHistory: Bool = false) -> BufferImage {
-        let history = skippingHistory ? min(buffer.yBase, buffer.lines.count) : 0
+        let history = skippingHistory ? min(buffer.replicationYBase, buffer.replicationLines.count) : 0
         var lines: [LineImage] = []
-        lines.reserveCapacity(buffer.lines.count - history)
-        for index in history..<buffer.lines.count {
-            lines.append(lineImage(buffer.lines[index], dropped: &dropped))
+        lines.reserveCapacity(buffer.replicationLines.count - history)
+        for index in history..<buffer.replicationLines.count {
+            lines.append(lineImage(buffer.replicationLines[index], dropped: &dropped))
         }
         var startRow: Int? = nil
-        if let start = buffer.semanticPromptStartLine, let row = buffer.absoluteRow(of: start) {
+        if let start = buffer.replicationSemanticPromptStartLine, let row = buffer.replicationAbsoluteRow(of: start) {
             startRow = row >= history ? row - history : nil
         }
         return BufferImage(
-            cols: buffer.cols, rows: buffer.rows, scrollback: buffer.scrollback,
-            lineCapacity: buffer.lines.maxLength,
+            cols: buffer.replicationCols, rows: buffer.replicationRows, scrollback: buffer.replicationScrollback,
+            lineCapacity: buffer.replicationLines.maxLength,
             pendingHistoryLines: history,
             lines: lines,
-            x: buffer.x, y: buffer.y, yBase: buffer.yBase - history, yDisp: max(0, buffer.yDisp - history),
-            xDisp: buffer.xDisp, xBase: buffer.xBase, linesTop: buffer.linesTop,
+            x: buffer.x, y: buffer.y, yBase: buffer.replicationYBase - history, yDisp: max(0, buffer.yDisp - history),
+            xDisp: buffer.replicationXDisp, xBase: buffer.replicationXBase, linesTop: buffer.replicationLinesTop,
             scrollTop: buffer.scrollTop, scrollBottom: buffer.scrollBottom,
             marginLeft: buffer.marginLeft, marginRight: buffer.marginRight,
-            tabStops: buffer.tabStops,
+            tabStops: buffer.replicationTabStops,
             savedX: buffer.savedX, savedY: buffer.savedY,
-            savedOriginMode: buffer.savedOriginMode,
-            savedMarginMode: buffer.savedMarginMode,
-            savedWraparound: buffer.savedWraparound,
-            savedReverseWraparound: buffer.savedReverseWraparound,
+            savedOriginMode: buffer.replicationSavedOriginMode,
+            savedMarginMode: buffer.replicationSavedMarginMode,
+            savedWraparound: buffer.replicationSavedWraparound,
+            savedReverseWraparound: buffer.replicationSavedReverseWraparound,
             savedAttr: buffer.savedAttr, savedCharset: buffer.savedCharset,
-            insertMode: buffer.insertMode, marginMode: buffer.marginMode,
-            wraparound: buffer.wraparound,
-            semanticContent: buffer.semanticContent,
-            semanticInput: buffer.semanticInput,
-            semanticClickMode: buffer.semanticClickMode,
-            semanticUsesSpecialCursorKeys: buffer.semanticUsesSpecialCursorKeys,
+            insertMode: buffer.replicationInsertMode, marginMode: buffer.replicationMarginMode,
+            wraparound: buffer.replicationWraparound,
+            semanticContent: buffer.replicationSemanticContent,
+            semanticInput: buffer.replicationSemanticInput,
+            semanticClickMode: buffer.replicationSemanticClickMode,
+            semanticUsesSpecialCursorKeys: buffer.replicationSemanticUsesSpecialCursorKeys,
             semanticPromptStartRow: startRow,
-            semanticGroupCounter: buffer.semanticGroupCounter,
-            activeSemanticGroupID: buffer.activeSemanticGroupID,
-            defaultBidiState: buffer.defaultBidiState)
+            semanticGroupCounter: buffer.replicationSemanticGroupCounter,
+            activeSemanticGroupID: buffer.replicationActiveSemanticGroupID,
+            defaultBidiState: buffer.replicationDefaultBidiState)
     }
 
     static func lineImage(_ line: BufferLine, dropped: inout Int) -> LineImage {
@@ -386,8 +387,8 @@ extension Terminal {
         }
         return LineImage(
             cols: line.count, isWrapped: line.isWrapped, bidiState: line.bidiState,
-            renderMode: LineImage.code(line.renderMode), semanticMarks: line.semanticMarks,
-            hardContinuationGroup: line.semanticHardContinuationGroup,
+            renderMode: LineImage.code(line.replicationRenderMode), semanticMarks: line.replicationSemanticMarks,
+            hardContinuationGroup: line.replicationSemanticHardContinuationGroup,
             tailAttribute: line.replicationTailAttribute, cells: cells)
     }
 }
@@ -403,137 +404,139 @@ extension Terminal {
         let modes = snapshot.modes
         var payloads: [String: TinyAtom] = [:]
 
-        _cols = modes.cols
-        _rows = modes.rows
+        replicationCols = modes.cols
+        replicationRows = modes.rows
         options.cols = modes.cols
         options.rows = modes.rows
-        tabStopWidth = modes.tabStopWidth
+        replicationTabStopWidth = modes.tabStopWidth
 
         let normal = makeBuffer(snapshot.normal, payloads: &payloads)
         let alt = makeBuffer(snapshot.alt, payloads: &payloads)
-        normalBuffer = normal
-        altBuffer = alt
-        _buffer = modes.altActive ? alt : normal
-        kittyGraphicsState.activeIsAlternate = modes.altActive
+        replicationNormalBuffer = normal
+        replicationAltBuffer = alt
+        replicationActiveBuffer = modes.altActive ? alt : normal
+        replicationKittyGraphicsActiveIsAlternate = modes.altActive
 
         options.cursorStyle = modes.cursorStyle
-        applicationKeypad = modes.applicationKeypad
+        replicationApplicationKeypad = modes.applicationKeypad
         applicationCursor = modes.applicationCursor
-        reverseColors = modes.reverseColors
-        keyboardModeNormal = KeyboardModeState(
+        replicationReverseColors = modes.reverseColors
+        replicationKeyboardModeNormal = (
             flags: KittyKeyboardFlags(rawValue: modes.kittyNormal.flags),
             stack: modes.kittyNormal.stack.map(KittyKeyboardFlags.init(rawValue:)))
-        keyboardModeAlt = KeyboardModeState(
+        replicationKeyboardModeAlt = (
             flags: KittyKeyboardFlags(rawValue: modes.kittyAlt.flags),
             stack: modes.kittyAlt.stack.map(KittyKeyboardFlags.init(rawValue:)))
-        sendFocus = modes.sendFocus
-        _currentBidiState = modes.currentBidiState
+        replicationSendFocus = modes.sendFocus
+        replicationCurrentBidiState = modes.currentBidiState
         bidiArrowKeySwap = modes.bidiArrowKeySwap
-        savedPrivateModes = modes.savedPrivateModes
-        cursorHidden = modes.cursorHidden
-        originMode = modes.originMode
-        marginMode = modes.marginMode
-        insertMode = modes.insertMode
-        wraparound = modes.wraparound
-        bracketedPasteMode = modes.bracketedPasteMode
-        alternateScrollMode = modes.alternateScrollMode
-        colorSchemeUpdatesEnabled = modes.colorSchemeUpdatesEnabled
-        colorScheme = modes.colorSchemeIsLight ? .light : .dark
-        charset = modes.charset
-        gCharsets = modes.gCharsets
-        gcharset = modes.gcharset
-        reverseWraparound = modes.reverseWraparound
-        setCurrentAttribute(modes.currentAttribute)
-        gLevel = modes.gLevel
-        cursorBlink = modes.cursorBlink
-        allow80To132 = modes.allow80To132
-        lineFeedMode = modes.lineFeedMode
-        smoothScroll = modes.smoothScroll
-        ansiColors = defaultAnsiColors
+        replicationSavedPrivateModes = modes.savedPrivateModes
+        replicationCursorHidden = modes.cursorHidden
+        replicationOriginMode = modes.originMode
+        replicationMarginMode = modes.marginMode
+        replicationInsertMode = modes.insertMode
+        replicationWraparound = modes.wraparound
+        replicationBracketedPasteMode = modes.bracketedPasteMode
+        replicationAlternateScrollMode = modes.alternateScrollMode
+        replicationColorSchemeUpdatesEnabled = modes.colorSchemeUpdatesEnabled
+        replicationColorScheme = modes.colorSchemeIsLight ? .light : .dark
+        replicationCharset = modes.charset
+        replicationGCharsets = modes.gCharsets
+        replicationGCharset = modes.gcharset
+        replicationReverseWraparound = modes.reverseWraparound
+        replicationSetCurrentAttribute(modes.currentAttribute)
+        replicationGLevel = modes.gLevel
+        replicationCursorBlink = modes.cursorBlink
+        replicationAllow80To132 = modes.allow80To132
+        replicationLineFeedMode = modes.lineFeedMode
+        replicationSmoothScroll = modes.smoothScroll
+        // Built in a local and stored once, so the palette is not copied per override.
+        var ansiColors = replicationDefaultAnsiColors
         for (index, rgb) in modes.paletteOverrides where index < ansiColors.count {
             ansiColors[index] = Color(red: rgb.red, green: rgb.green, blue: rgb.blue)
         }
-        cc.send8bit = modes.send8bit
-        hostCurrentDirectory = modes.hostCurrentDirectory
-        hostCurrentDocument = modes.hostCurrentDocument
-        mouseProtocol = modes.mouseProtocol
-        mouseMode = modes.mouseMode
-        mouseShiftCapture = modes.mouseShiftCapture
-        xtermTitleSetUtf = modes.xtermTitleSetUtf
-        xtermTitleSetHex = modes.xtermTitleSetHex
-        xtermTitleQueryUtf = modes.xtermTitleQueryUtf
-        xtermTitleQueryHex = modes.xtermTitleQueryHex
-        conformance = modes.conformance
+        replicationAnsiColors = ansiColors
+        replicationSend8bit = modes.send8bit
+        replicationHostCurrentDirectory = modes.hostCurrentDirectory
+        replicationHostCurrentDocument = modes.hostCurrentDocument
+        replicationMouseProtocol = modes.mouseProtocol
+        replicationMouseMode = modes.mouseMode
+        replicationMouseShiftCapture = modes.mouseShiftCapture
+        replicationXtermTitleSetUtf = modes.xtermTitleSetUtf
+        replicationXtermTitleSetHex = modes.xtermTitleSetHex
+        replicationXtermTitleQueryUtf = modes.xtermTitleQueryUtf
+        replicationXtermTitleQueryHex = modes.xtermTitleQueryHex
+        replicationConformance = modes.conformance
         switch modes.activeHyperlink {
-        case .none: activeHyperlink = nil
-        case .open(let payload): activeHyperlink = .pending(payload)
-        case .unavailable: activeHyperlink = .unavailable
+        case .none: replicationSetActiveHyperlink(nil)
+        case .open(let payload): replicationSetActiveHyperlink(.some(payload))
+        case .unavailable: replicationSetActiveHyperlink(.some(nil))
         }
-        terminalTitle = modes.terminalTitle
-        iconTitle = modes.iconTitle
-        terminalTitleStack = modes.terminalTitleStack
-        terminalIconStack = modes.terminalIconStack
-        visibilityReportsEnabled = modes.visibilityReportsEnabled
-        inBandSizeReportsEnabled = modes.inBandSizeReportsEnabled
-        kittyPasteEventsEnabled = modes.kittyPasteEventsEnabled
+        replicationTerminalTitle = modes.terminalTitle
+        replicationIconTitle = modes.iconTitle
+        replicationTerminalTitleStack = modes.terminalTitleStack
+        replicationTerminalIconStack = modes.terminalIconStack
+        replicationVisibilityReportsEnabled = modes.visibilityReportsEnabled
+        replicationInBandSizeReportsEnabled = modes.inBandSizeReportsEnabled
+        replicationKittyPasteEventsEnabled = modes.kittyPasteEventsEnabled
 
-        resetParserForImport()
+        replicationResetParser()
         if modes.synchronizedOutputActive {
-            beginSynchronizedOutput()
+            replicationBeginSynchronizedOutput()
         } else if synchronizedOutputActive {
-            endSynchronizedOutput()
+            replicationEndSynchronizedOutput()
         }
         if !snapshot.pendingParserBytes.isEmpty {
             feed(byteArray: snapshot.pendingParserBytes)
         }
         refresh(startRow: 0, endRow: rows - 1)
-        tdel?.bufferActivated(source: self)
+        replicationNotifyBufferActivated()
     }
 
     private func makeBuffer(_ image: BufferImage, payloads: inout [String: TinyAtom]) -> Buffer {
-        let buffer = Buffer(cols: image.cols, rows: image.rows, tabStopWidth: tabStopWidth,
-                            scrollback: image.scrollback, bidiState: image.defaultBidiState,
-                            arena: cellArena)
-        buffer.terminal = self
-        if buffer.lines.maxLength != image.lineCapacity {
-            buffer.lines.maxLength = image.lineCapacity
+        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabStopWidth: replicationTabStopWidth,
+                                            scrollback: image.scrollback, bidiState: image.defaultBidiState,
+                                            arena: replicationCellArena)
+        buffer.replicationTerminal = self
+        if buffer.replicationLines.maxLength != image.lineCapacity {
+            buffer.replicationLines.maxLength = image.lineCapacity
         }
         for lineImage in image.lines {
-            buffer.lines.push(makeImportedLine(lineImage, arena: buffer.cellArena, payloads: &payloads))
+            buffer.replicationLines.push(makeImportedLine(lineImage, arena: buffer.replicationCellArena, payloads: &payloads))
         }
         buffer.x = image.x
         buffer.y = image.y
-        buffer.yBase = image.yBase
+        buffer.replicationYBase = image.yBase
         buffer.yDisp = image.yDisp
-        buffer.xDisp = image.xDisp
-        buffer.xBase = image.xBase
-        buffer.linesTop = image.linesTop
+        buffer.replicationXDisp = image.xDisp
+        buffer.replicationXBase = image.xBase
+        buffer.replicationLinesTop = image.linesTop
         buffer.scrollTop = image.scrollTop
         buffer.scrollBottom = image.scrollBottom
         buffer.marginLeft = image.marginLeft
         buffer.marginRight = image.marginRight
-        buffer.tabStops = image.tabStops
+        buffer.replicationTabStops = image.tabStops
         buffer.savedX = image.savedX
         buffer.savedY = image.savedY
-        buffer.savedOriginMode = image.savedOriginMode
-        buffer.savedMarginMode = image.savedMarginMode
-        buffer.savedWraparound = image.savedWraparound
-        buffer.savedReverseWraparound = image.savedReverseWraparound
+        buffer.replicationSavedOriginMode = image.savedOriginMode
+        buffer.replicationSavedMarginMode = image.savedMarginMode
+        buffer.replicationSavedWraparound = image.savedWraparound
+        buffer.replicationSavedReverseWraparound = image.savedReverseWraparound
         buffer.savedAttr = image.savedAttr
         buffer.savedCharset = image.savedCharset
-        buffer.setInsertMode(image.insertMode)
-        buffer.setMarginMode(image.marginMode)
-        buffer.setWraparound(image.wraparound)
-        buffer.semanticContent = image.semanticContent
-        buffer.semanticInput = image.semanticInput
-        buffer.semanticClickMode = image.semanticClickMode
-        buffer.semanticUsesSpecialCursorKeys = image.semanticUsesSpecialCursorKeys
-        if let row = image.semanticPromptStartRow, row >= 0, row < buffer.lines.count {
-            buffer.semanticPromptStartLine = buffer.lines[row]
-            buffer.semanticPromptStartRowCache = row
+        buffer.replicationSetInsertMode(image.insertMode)
+        buffer.replicationSetMarginMode(image.marginMode)
+        buffer.replicationSetWraparound(image.wraparound)
+        buffer.replicationSemanticContent = image.semanticContent
+        buffer.replicationSemanticInput = image.semanticInput
+        buffer.replicationSemanticClickMode = image.semanticClickMode
+        buffer.replicationSemanticUsesSpecialCursorKeys = image.semanticUsesSpecialCursorKeys
+        if let row = image.semanticPromptStartRow, row >= 0, row < buffer.replicationLines.count {
+            buffer.replicationSemanticPromptStartLine = buffer.replicationLines[row]
+            buffer.replicationSemanticPromptStartRowCache = row
         }
-        buffer.semanticGroupCounter = image.semanticGroupCounter
-        buffer.activeSemanticGroupID = image.activeSemanticGroupID
+        buffer.replicationSemanticGroupCounter = image.semanticGroupCounter
+        buffer.replicationActiveSemanticGroupID = image.activeSemanticGroupID
         return buffer
     }
 
@@ -542,8 +545,8 @@ extension Terminal {
         guard let blank = arena.pack(attribute: image.tailAttribute, scalar: 0, widthState: .narrow) else {
             preconditionFailure("The snapshot holds an attribute this arena cannot store")
         }
-        let line = BufferLine(cols: image.cols, packedFill: blank, blankTailCell: blank,
-                              isWrapped: image.isWrapped, bidiState: image.bidiState, arena: arena)
+        let line = BufferLine.replicationMake(cols: image.cols, packedFill: blank, blankTailCell: blank,
+                                              isWrapped: image.isWrapped, bidiState: image.bidiState, arena: arena)
         var packed: [PackedCell] = []
         packed.reserveCapacity(image.cells.count)
         var lastAttribute: Attribute? = nil
@@ -584,9 +587,9 @@ extension Terminal {
             packed.append(general)
         }
         line.replicationWritePacked(packed)
-        line.renderMode = LineImage.renderMode(image.renderMode)
+        line.replicationRenderMode = LineImage.renderMode(image.renderMode)
         line.replicationSetSemanticMarks(image.semanticMarks)
-        line.semanticHardContinuationGroup = image.hardContinuationGroup
+        line.replicationSemanticHardContinuationGroup = image.hardContinuationGroup
         return line
     }
 }

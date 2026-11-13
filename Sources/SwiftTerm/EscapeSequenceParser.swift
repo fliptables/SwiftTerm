@@ -817,6 +817,40 @@ final class EscapeSequenceParser {
         appendRun(data, runStart..<end)
     }
 
+    /// The sequence-boundary hook: called once per table transition, from the
+    /// parse loop's single tail, before the loop's state advances from
+    /// `currentState` to `nextState`. It updates the loop's two locals that
+    /// `recordPendingSequence` reads at the end of the batch: where the open
+    /// sequence began (`index` of the byte that opened it) and the C0
+    /// controls executed inside it. It touches no other state.
+    @inline(__always)
+    private static func noteSequenceBoundary(
+        action: ParserAction, code: UInt8, index i: Int, from currentState: UInt8, to nextState: UInt8,
+        sequenceStart: inout Int, sequenceSkips: inout [Int])
+    {
+        if nextState != ParserState.ground.rawValue {
+            let groundState = ParserState.ground.rawValue
+            switch action {
+            case .clear where code == 0x1b || (code >= 0x80 && code <= 0x9f):
+                // ESC or a C1 introducer opens a new sequence and
+                // abandons any open one.
+                sequenceStart = i
+                sequenceSkips.removeAll(keepingCapacity: true)
+            case .oscEnd, .dcsUnhook:
+                // A string ended by ESC: the ESC opens the next sequence.
+                sequenceStart = i
+                sequenceSkips.removeAll(keepingCapacity: true)
+            case .execute where currentState != groundState:
+                sequenceSkips.append(i)
+            default:
+                if currentState == groundState {
+                    sequenceStart = i
+                    sequenceSkips.removeAll(keepingCapacity: true)
+                }
+            }
+        }
+    }
+
     @inline(__always)
     private func appendRun(_ data: Span<UInt8>, _ range: Range<Int>) {
         guard !range.isEmpty else { return }
@@ -1269,29 +1303,10 @@ final class EscapeSequenceParser {
             case .reserved:
                 break
             }
-            let nextState = transition & 15
-            if nextState != ParserState.ground.rawValue {
-                let groundState = ParserState.ground.rawValue
-                switch action {
-                case .clear where code == 0x1b || (code >= 0x80 && code <= 0x9f):
-                    // ESC or a C1 introducer opens a new sequence and
-                    // abandons any open one.
-                    sequenceStart = i
-                    sequenceSkips.removeAll(keepingCapacity: true)
-                case .oscEnd, .dcsUnhook:
-                    // A string ended by ESC: the ESC opens the next sequence.
-                    sequenceStart = i
-                    sequenceSkips.removeAll(keepingCapacity: true)
-                case .execute where currentState != groundState:
-                    sequenceSkips.append(i)
-                default:
-                    if currentState == groundState {
-                        sequenceStart = i
-                        sequenceSkips.removeAll(keepingCapacity: true)
-                    }
-                }
-            }
-            currentState = nextState
+            EscapeSequenceParser.noteSequenceBoundary(
+                action: action, code: code, index: i, from: currentState, to: transition & 15,
+                sequenceStart: &sequenceStart, sequenceSkips: &sequenceSkips)
+            currentState = transition & 15
             input = input.extracting(droppingFirst: consumed)
             i += consumed
         }
