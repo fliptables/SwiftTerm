@@ -985,7 +985,7 @@ final class KittyClipboardProtocol: @unchecked Sendable {
             return .rejected
         }
         terminal.registerUserInput(bytes[...])
-        terminal.tdel?.send(source: terminal, data: bytes[...])
+        terminal.sendUserInputBytes(bytes[...])
         return .textSent
     }
 

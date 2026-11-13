@@ -924,10 +924,23 @@ open class Terminal {
         set { cold.respondsToQueries = newValue }
     }
 
-    /// The one sink for a response this terminal generates from its input.
+    /// The reply sink (IT-2001 P2): every byte this terminal generates from
+    /// parsed input goes through here, and only the terminal that responds
+    /// sends it. With ``sendUserInputBytes(_:)`` it is one of the two places
+    /// that write bytes toward the child.
     @inline(__always)
     func sendQueryResponse(_ data: ArraySlice<UInt8>) {
         guard respondsToQueries else { return }
+        tdel?.send(source: self, data: data)
+    }
+
+    /// The user-input sink (IT-2001 P2): bytes the user caused (keyboard,
+    /// paste, mouse packets, semantic-prompt clicks, a focus change). Not
+    /// gated: a replica sends them. Transport only: input registration
+    /// (``registerUserInput(_:)``) is a separate call at the sites that
+    /// register.
+    @inline(__always)
+    func sendUserInputBytes(_ data: ArraySlice<UInt8>) {
         tdel?.send(source: self, data: data)
     }
 
@@ -1138,13 +1151,13 @@ open class Terminal {
     public func setTerminalFocus(_ focused: Bool) {
         reportedFocusState = focused
         if sendFocus {
-            sendFocusReport()
+            // A real focus change: user input.
+            sendUserInputBytes(focusReportBytes()[...])
         }
     }
 
-    func sendFocusReport() {
-        let data: [UInt8] = cc.CSI + [reportedFocusState ? 0x49 : 0x4f]
-        tdel?.send(source: self, data: data[0...])
+    func focusReportBytes() -> [UInt8] {
+        cc.CSI + [reportedFocusState ? 0x49 : 0x4f]
     }
 
     /// Records the terminal's effective visibility and reports a change to subscribed applications.
@@ -3211,7 +3224,7 @@ open class Terminal {
     /// paste, and programmatic input.
     public func sendUserInput(_ data: ArraySlice<UInt8>) {
         registerUserInput(data)
-        tdel?.send(source: self, data: data)
+        sendUserInputBytes(data)
     }
 
     /// Updates semantic interaction state for input delivered by a view.
@@ -3642,7 +3655,7 @@ open class Terminal {
             }
             // A click is user input, not a query response: it is sent even
             // when `respondsToQueries` is false.
-            tdel?.send(source: self, data: Array("\u{1b}[<0;\(x);\(y)M".utf8)[...])
+            sendUserInputBytes(Array("\u{1b}[<0;\(x);\(y)M".utf8)[...])
             return true
         case .cursorKeys(let strategy):
             // A pending wrap counts as the column after the cursor, so the
@@ -3663,7 +3676,7 @@ open class Terminal {
     }
 
     private func sendRepeatedSemanticSequence(_ data: [UInt8]) {
-        tdel?.send(source: self, data: data[...])
+        sendUserInputBytes(data[...])
     }
 
     // MARK: OSC 133 stream handling (R2, R4)
@@ -7433,11 +7446,9 @@ open class Terminal {
                 // Report the current state right away (xterm behavior), so
                 // the application does not assume it is unfocused until the
                 // first real focus change. This report answers parsed
-                // input, so only the terminal that responds sends it; a
-                // later focus change (`setTerminalFocus`) is user input.
-                if respondsToQueries {
-                    sendFocusReport()
-                }
+                // input, so it is a reply; a later focus change
+                // (`setTerminalFocus`) is user input.
+                sendQueryResponse(focusReportBytes()[...])
             case 1007: // alternate scroll mode (xterm's alternateScroll resource)
                 alternateScrollMode = true
             case 1005:
@@ -8048,22 +8059,23 @@ open class Terminal {
     }
 
     public func sendResponse(_ text: String) { sendResponse(text: text) }
-    public func sendResponse(_ bytes: [UInt8]) { tdel?.send(source: self, data: bytes[...]) }
+    // IT-2001 P2: every overload is the reply sink. A replica answers nothing.
+    public func sendResponse(_ bytes: [UInt8]) { sendQueryResponse(bytes[...]) }
     public func sendResponse(_ prefix: [UInt8], _ text: String) {
         var response = prefix
         response.append(contentsOf: text.utf8)
-        tdel?.send(source: self, data: response[...])
+        sendQueryResponse(response[...])
     }
     public func sendResponse(_ prefix: [UInt8], _ bytes: [UInt8]) {
         var response = prefix
         response.append(contentsOf: bytes)
-        tdel?.send(source: self, data: response[...])
+        sendQueryResponse(response[...])
     }
     public func sendResponse(_ prefix: [UInt8], _ text: String, _ suffix: [UInt8]) {
         var response = prefix
         response.append(contentsOf: text.utf8)
         response.append(contentsOf: suffix)
-        tdel?.send(source: self, data: response[...])
+        sendQueryResponse(response[...])
     }
     
     /**
@@ -8076,13 +8088,6 @@ open class Terminal {
         sendQueryResponse(responseBytes(items)[...])
     }
 
-    /// Sends a report the user caused (a mouse event). Unlike
-    /// ``sendResponse(_:)`` it is not a query response, so a passive replica
-    /// (`respondsToQueries == false`) still sends it.
-    func sendUserReport (_ items: Any ...)
-    {
-        tdel?.send (source: self, data: responseBytes(items)[...])
-    }
 
     private func responseBytes (_ items: [Any]) -> [UInt8]
     {
@@ -9539,8 +9544,9 @@ open class Terminal {
      */
     public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
     {
-        sendResponse(mouseEventBytes(buttonFlags: buttonFlags, x: x, y: y,
-                                     pixelX: pixelX, pixelY: pixelY))
+        // IT-2001: D8. A mouse packet is user input, not a reply.
+        sendUserInputBytes(mouseEventBytes(buttonFlags: buttonFlags, x: x, y: y,
+                                           pixelX: pixelX, pixelY: pixelY)[...])
     }
 
     /// Encodes a response without invoking the delegate. Owners can copy it
@@ -9557,9 +9563,9 @@ open class Terminal {
 
     private func sendMousePacket(buttonFlags: Int, release: Bool, originalButton: Int,
                                  x: Int, y: Int, pixelX: Int, pixelY: Int) {
-        sendResponse(mousePacketBytes(buttonFlags: buttonFlags, release: release,
-                                      originalButton: originalButton, x: x, y: y,
-                                      pixelX: pixelX, pixelY: pixelY))
+        sendUserInputBytes(mousePacketBytes(buttonFlags: buttonFlags, release: release,
+                                            originalButton: originalButton, x: x, y: y,
+                                            pixelX: pixelX, pixelY: pixelY)[...])
     }
 
     // IT-2001: D8. Mouse report encoding is upstream's (it returns bytes).
