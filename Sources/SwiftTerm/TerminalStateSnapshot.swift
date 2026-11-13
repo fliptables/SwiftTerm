@@ -235,11 +235,17 @@ extension Terminal.TerminalConformance: Equatable {}
 
 extension Terminal {
     /// Exports the emulator state. Call under `terminalLock`, between feeds.
+    ///
+    /// Returns `nil`, reading and changing nothing, when ``pendingParserBytes``
+    /// is `nil`: the parser is inside a sequence it has not recorded, and a
+    /// snapshot taken now would put a replica's parser in ground. The caller
+    /// must wait; the next feed that returns the parser to ground ends the wait.
     public func exportState() -> TerminalStateSnapshot? {
         exportState(skippingHistory: false)
     }
 
     func exportState(skippingHistory: Bool) -> TerminalStateSnapshot? {
+        guard let pending = pendingParserBytes else { return nil }
         var dropped = 0
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
@@ -301,7 +307,7 @@ extension Terminal {
         let altImage = Terminal.bufferImage(replicationAltBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
-            pendingParserBytes: pendingParserBytes ?? [],
+            pendingParserBytes: pending,
             droppedPayloadCount: dropped)
     }
 

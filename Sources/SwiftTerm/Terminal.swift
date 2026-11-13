@@ -903,10 +903,11 @@ open class Terminal {
     /// The bytes the parser holds from an unfinished sequence, verbatim, so a
     /// second terminal fed them resumes in the same parser state. A C0 control
     /// executed inside the sequence is left out, because its effect is already
-    /// in this terminal's state. Empty when ``hasPendingSequence`` is false;
-    /// `nil` when the open sequence is larger than the parser keeps (an image
-    /// transfer), in which case the caller waits for the next feed. Read under
-    /// `terminalLock`, between feeds.
+    /// in this terminal's state. Empty when ``hasPendingSequence`` is false.
+    /// `nil` means "wait": the open sequence is larger than the parser keeps
+    /// (an image transfer), so no snapshot can be taken (``exportState()``
+    /// returns `nil`); the next feed that returns the parser to ground ends
+    /// the wait. Read under `terminalLock`, between feeds.
     public var pendingParserBytes: [UInt8]? {
         if parser.pendingSequenceOverflowed { return nil }
         if readingBuffer.putbackBuffer.isEmpty { return parser.pendingSequenceBytes }
