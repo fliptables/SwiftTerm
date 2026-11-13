@@ -500,207 +500,57 @@ final class SelectionTests: TerminalDelegate {
         #expect(selection.end.col == 3)
     }
 
-    // MARK: - Rectangular (column-block) Selection
+    // MARK: - Selection mode resets (IT-2001 D1)
+    //
+    // The fork's rectangular selection is gone; block selection is upstream's
+    // `isBlock` (see BlockSelectionTests). These three keep the fork's mode-reset
+    // guarantees and add that each also ends a block selection.
 
-    /// Rectangular selection extracts the same column slice from every row in
-    /// the row range, joined by `\n`.
-    @Test func testRectangularBasic() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
-
-        selection.setSelection(
-            start: Position(col: 2, row: 0),
-            end: Position(col: 6, row: 2)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
-    }
-
-    /// Reverse-corner drag (lower-right anchor → upper-left release) must produce
-    /// the same rectangle as the forward case — start/end are independently min/maxed.
-    @Test func testRectangularReverseDrag() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
-
-        selection.setSelection(
-            start: Position(col: 6, row: 2),
-            end: Position(col: 2, row: 0)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
-    }
-
-    /// Upper-right to lower-left diagonal (start.col > end.col, start.row < end.row)
-    /// should still resolve to the minRow/maxRow × minCol/maxCol rectangle.
-    @Test func testRectangularDiagonalDrag() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
-
-        selection.setSelection(
-            start: Position(col: 6, row: 0),
-            end: Position(col: 2, row: 2)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "cdef\nmnop\nwxyz")
-    }
-
-    /// Zero-width drag (start.col == end.col) yields an empty selection — never a
-    /// column of newlines.
-    @Test func testRectangularZeroWidthIsEmpty() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "abcdefghij\r\nklmnopqrst\r\nuvwxyz1234")
-
-        selection.setSelection(
-            start: Position(col: 5, row: 0),
-            end: Position(col: 5, row: 2)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "")
-    }
-
-    /// A rectangle that covers a row past end-of-content emits a blank line —
-    /// preserving the vertical structure of the original block.
-    @Test func testRectangularPreservesBlankLine() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "AAA\r\n\r\nCCC")
-
-        selection.setSelection(
-            start: Position(col: 0, row: 0),
-            end: Position(col: 3, row: 2)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "AAA\n\nCCC")
-    }
-
-    /// Trailing whitespace within the column slice is trimmed per row, but rows
-    /// where the slice covers actual content keep that content intact.
-    @Test func testRectangularRstripsPerRow() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 5))
-        let selection = SelectionService(terminal: terminal)
-        // Row 0: "ab" (2 chars, then blanks). Slice [0..6) trims to "ab".
-        // Row 1: "klmnop" (6 chars). Slice [0..6) keeps all 6.
-        terminal.feed(text: "ab\r\nklmnop")
-
-        selection.setSelection(
-            start: Position(col: 0, row: 0),
-            end: Position(col: 6, row: 1)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "ab\nklmnop")
-    }
-
-    /// dragExtend in rectangular mode must only update `end` — no word-boundary
-    /// expansion, even if the position lands in the middle of a word. Column
-    /// range is `[minCol, maxCol)` — end is exclusive, matching flow selection.
-    @Test func testRectangularDragExtendNoWordExpansion() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "hello world")
-
-        selection.setSelection(
-            start: Position(col: 1, row: 0),
-            end: Position(col: 1, row: 0)
-        )
-        selection.selectionMode = .rectangular
-        selection.dragExtend(bufferPosition: Position(col: 8, row: 0))
-
-        #expect(selection.end.col == 8)
-        // Cols [1, 8) → "ello wo" (7 chars).
-        #expect(selection.getSelectedText() == "ello wo")
-    }
-
-    /// shiftExtend in rectangular mode updates the rectangle's `end` — no word
-    /// boundary expansion, no swap of start.
-    @Test func testRectangularShiftExtendNoWordExpansion() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
-        let selection = SelectionService(terminal: terminal)
-        terminal.feed(text: "hello world test")
-
-        selection.setSelection(
-            start: Position(col: 1, row: 0),
-            end: Position(col: 4, row: 0)
-        )
-        selection.selectionMode = .rectangular
-        selection.shiftExtend(bufferPosition: Position(col: 9, row: 0))
-
-        #expect(selection.start.col == 1)
-        #expect(selection.end.col == 9)
-        // Cols [1, 9) → "ello wor" (8 chars).
-        #expect(selection.getSelectedText() == "ello wor")
-    }
-
-    /// Calling selectWordOrExpression after a rectangular selection resets mode
-    /// to .word — prevents rectangular-mode stickiness.
+    /// Calling selectWordOrExpression after a block selection resets mode to
+    /// .word and ends the block.
     @Test func testWordSelectionAfterRectangularResetsMode() {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        selection.setSelection(
-            start: Position(col: 0, row: 0),
-            end: Position(col: 3, row: 0)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.selectionMode == .rectangular)
+        selection.startBlockSelection(bufferPosition: Position(col: 0, row: 0))
+        selection.dragExtend(bufferPosition: Position(col: 3, row: 0))
+        #expect(selection.isBlock)
 
         selection.selectWordOrExpression(at: Position(col: 6, row: 0), in: terminal.buffer)
         #expect(selection.selectionMode == .word)
+        #expect(selection.isBlock == false)
         #expect(selection.getSelectedText() == "world")
     }
 
-    /// startSelection() resets mode to .character — guards against rectangular
-    /// stickiness when the user begins a fresh non-rectangular drag.
+    /// startSelection() resets mode to .character and ends a block selection.
     @Test func testStartSelectionResetsRectangularMode() {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        selection.setSelection(
-            start: Position(col: 0, row: 0),
-            end: Position(col: 3, row: 0)
-        )
-        selection.selectionMode = .rectangular
+        selection.startBlockSelection(bufferPosition: Position(col: 0, row: 0))
+        selection.dragExtend(bufferPosition: Position(col: 3, row: 0))
+        #expect(selection.isBlock)
+
         selection.startSelection(row: 0, col: 5)
 
         #expect(selection.selectionMode == .character)
+        #expect(selection.isBlock == false)
     }
 
-    /// Wide CJK glyph: a rectangle covering the lead column extracts the whole
-    /// glyph — translateToString's skipNullCellsFollowingWide handling preserves
-    /// glyph integrity.
-    @Test func testRectangularWideGlyph() {
-        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 1))
-        let selection = SelectionService(terminal: terminal)
-        // "あ" is 2 cells (lead + trailing null). Cols 0..3 covers glyph + '1'.
-        terminal.feed(text: "あ12345")
-
-        selection.setSelection(
-            start: Position(col: 0, row: 0),
-            end: Position(col: 3, row: 0)
-        )
-        selection.selectionMode = .rectangular
-        #expect(selection.getSelectedText() == "あ1")
-    }
-
-    /// setSelection resets mode to .character — guards against rectangular
-    /// stickiness when another feature (search result highlight, programmatic
-    /// selection) drives the selection without setting mode explicitly.
+    /// setSelection resets mode to .character and ends a block selection — guards
+    /// against block stickiness when another feature (search result highlight,
+    /// programmatic selection) drives the selection without resetting the mode.
     @Test func testSetSelectionResetsRectangularMode() {
         let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
         let selection = SelectionService(terminal: terminal)
         terminal.feed(text: "hello world")
 
-        // Start with a rectangular selection.
-        selection.setSelection(
-            start: Position(col: 1, row: 0),
-            end: Position(col: 4, row: 0)
-        )
-        selection.selectionMode = .rectangular
+        // Start with a block selection.
+        selection.startBlockSelection(bufferPosition: Position(col: 1, row: 0))
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 0))
+        #expect(selection.isBlock)
 
         // Simulate the search code path: setSelection with no explicit mode reset.
         selection.setSelection(
@@ -709,6 +559,7 @@ final class SelectionTests: TerminalDelegate {
         )
 
         #expect(selection.selectionMode == .character)
+        #expect(selection.isBlock == false)
         #expect(selection.getSelectedText() == "world")
     }
 

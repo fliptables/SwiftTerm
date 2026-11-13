@@ -3010,16 +3010,6 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         return allowMouseReporting && !optionDragIsLocal && !shiftBypassesMouseReportingLocked(for: event)
     }
 
-    /// Option held — or a rectangular selection mid-drag — bypasses mouse-reporting
-    /// forwarding. Sibling of `shiftBypassesMouseReporting` (upstream #536), but for
-    /// Option-modifier rectangular selection. Both gates apply at every mouse-event
-    /// site so users can do native selection inside any TUI that's enabled mouse
-    /// reporting (vim, htop, less, fzf).
-    private func optionBypassesMouseReporting(for event: NSEvent) -> Bool {
-        return event.modifierFlags.contains(.option)
-            || selection.selectionMode == .rectangular
-    }
-
     open override func mouseDown(with event: NSEvent) {
         didSelectionDrag = false
         previousPressureStage = 0
@@ -3041,7 +3031,6 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
                 col: pressLocation.col,
                 row: pressLocation.row - terminal.displayBuffer.yDisp)
             terminal.beginPrimaryPointerPress(at: pressLocation)
-            // IT-2001: D1. Block selection is upstream's (held Option press).
             if reportsMouseLocked(for: event) && terminal.mouseMode.sendButtonPress() {
                 if pressSelectsBlock {
                     // Hold it: a drag selects a block without the application,
@@ -3253,7 +3242,6 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             activateLink(result.link, params: result.params, isExplicit: result.isExplicit)
             return
         }
-        // IT-2001: D1.
         if withTerminal({ terminal in reportsMouseLocked(for: event) && terminal.mouseMode.sendButtonRelease() }) {
             sharedMouseEvent(with: event)
             return
@@ -3298,7 +3286,6 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             let displayBuffer = terminal.displayBuffer
             let mouseHit = calculateMouseHitLocked(at: point)
             let hit = mouseHit.grid
-            // IT-2001: D1. Block selection is upstream's (held Option press).
             // A held Option press sends nothing while it may still be a click.
             let leftReporting = releaseHeldOptionPressForDragLocked(to: point, hit: hit)
             if heldOptionPress != nil {

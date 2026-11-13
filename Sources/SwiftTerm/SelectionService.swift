@@ -257,7 +257,6 @@ public class SelectionService: CustomDebugStringConvertible {
 
     func selectedColumnsRange (row: Int, cols: Int) -> Range<Int>?
     {
-        // IT-2001: D1. Block selection is upstream's (isBlock).
         SelectionService.selectedColumns (row: row, cols: cols, start: start, end: end,
                                           block: isBlock, exclusiveEnd: exclusiveEnd)
     }
@@ -459,18 +458,13 @@ public class SelectionService: CustomDebugStringConvertible {
                         row: max(0, min(p.row, maxRow)))
     }
     /**
-     * Sets the selection, this is validated against the buffer bounds.
-     *
-     * Resets `selectionMode` to `.character` — same invariant as `startSelection()`,
-     * `select(row:)`, and `selectWordOrExpression(...)`. Callers that want a
-     * non-character mode (e.g. `.rectangular`) should set `selectionMode` *after*
-     * calling this method.
+     * Sets the selection, this is validated against the
      */
     public func setSelection (start: Position, end: Position) {
         let buffer = terminal.displayBuffer
         let sclamped = clamp (buffer, start)
         let eclamped = clamp (buffer, end)
-
+        
         self.start = sclamped
         self.end = eclamped
         pivot = nil
@@ -567,7 +561,7 @@ public class SelectionService: CustomDebugStringConvertible {
         }
 
         var adjustedNewEnd = newEnd
-
+        
         // If we're in word selection mode, extend to word boundaries
         if selectionMode == .word {
             let direction = Position.compare(newEnd, start) == .before ? -1 : 1
@@ -618,30 +612,14 @@ public class SelectionService: CustomDebugStringConvertible {
             return
         }
 
-        if selectionMode == .rectangular {
-            let clamped = clamp(terminal.displayBuffer, bufferPosition)
-            switch Position.compare(clamped, pivot) {
-            case .after:
-                start = pivot
-                end = clamped
-            case .before:
-                start = clamped
-                end = pivot
-            case .equal:
-                start = pivot
-                end = pivot
-            }
-            setActiveAndNotify()
-            return
-        }
         if selectionMode == .row {
             setRowSelection(from: pivot.row, through: bufferPosition.row)
             setActiveAndNotify()
             return
         }
-
+        
         var adjustedPosition = bufferPosition
-
+        
         // If we're in word selection mode, extend to word boundaries
         if selectionMode == .word {
             let direction = Position.compare(bufferPosition, pivot) == .before ? -1 : 1
@@ -745,10 +723,6 @@ public class SelectionService: CustomDebugStringConvertible {
         case character
         case word
         case row
-        // Column-block selection. Each row in [min(start.row,end.row), max(...)] contributes
-        // the same column slice [min(start.col,end.col), max(...)]. Drag/shift/pivot extend
-        // only updates `end`; word-boundary expansion is intentionally skipped.
-        case rectangular
     }
     
     public var selectionMode: SelectionMode = .character

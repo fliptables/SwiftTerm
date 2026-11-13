@@ -10667,8 +10667,6 @@ open class Terminal {
         TerminalEventTime.now().uptimeNanoseconds
     }
 #endif
-    // IT-2001: D1. The fork's getRectangularText is gone; block text is
-    // SelectionService.blockText().
 }
 
 #if !SWIFTTERM_EMBEDDED
