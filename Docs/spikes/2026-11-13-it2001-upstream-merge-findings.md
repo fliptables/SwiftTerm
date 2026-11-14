@@ -984,15 +984,16 @@ kept only if breaking it would crash, trap or allocate. Every bound was tried ag
 (`liveExportsInEdgeStatesStillDecode`, `resizeCutsStillDecode` with 6 sizes smaller and larger on
 both buffers, whole + screen part + chunks, and `wideLinesAndALongScrollbackStillDecode` with 500
 columns and 6000 lines into a 5000-line scrollback). Six invariants were relaxed to what those
-exports showed (rows marked RELAXED). Each relaxed check has a comment so nobody tightens it later.
+exports showed (rows marked RELAXED). Every `refuses` red first checks that the unedited snapshot
+decodes, so each refusal comes from its edit (P3). Each relaxed check has a comment so nobody tightens it later.
 
 | Field | Bound after decode | Why (the crash, trap or allocation) |
 |---|---|---|
 | gCharsets.count | == 4 | Terminal indexes G0-G3 |
 | gLevel | < 4 | indexes gCharsets |
-| active buffer cols/rows | == modes cols/rows | RELAXED for the hidden buffer: under the alt screen a resize left normal at 30x8 while modes said 45x14. The hidden buffer gets cols, rows > 0 and every other check uses its own grid |
+| buffer cols/rows | alt == modes ALWAYS; normal == modes unless the alt screen is active | RELAXED for the hidden NORMAL buffer only: under the alt screen a resize left normal at 30x8 while modes said 45x14. Upstream resizes the alt buffer on every resize (Terminal.swift:1512) and defers only the normal one, only while the alt screen is active (:1505-1511; caught up at :1449/:1488). The reader's delta read (P1) narrowed the first relaxation, which let either hidden buffer differ |
 | tabStops.count | >= cols | a TAB reads tabStops[x]. A fresh buffer holds cols + 1 (31 at 30 cols); a resized one holds exactly cols |
-| lines held | lines.count + pendingHistoryLines >= rows, or 0 on the INACTIVE buffer only | RELAXED: the screen part of an alt buffer grown by a resize held 8 lines for 14 rows (yBase 6 left as history). An alternate buffer that was never activated exports 0 lines |
+| lines held | lines.count + pendingHistoryLines >= rows, or 0 on the INACTIVE ALT buffer only | RELAXED: the screen part of an alt buffer grown by a resize held 8 lines for 14 rows (yBase 6 left as history). An alternate buffer that was never activated exports 0 lines; a normal buffer is never empty. Driven (`aScreenPartWithHistoryStillToComeSurvives`): that honest screen part, and the extreme (1 line, rows - 1 pending), each imported before any chunk, survive feeds, DECRC, scrolls, resizes and an alt round trip without a trap. Observed on the way: such a replica's OWN export (40x12 holding 8 lines, nothing pending) does not decode. No owner exports that state; a replica is never an exporter |
 | line cols | >= buffer cols | RELAXED from ==: a resize without reflow (alt, no scrollback) keeps wider lines (widths [3, 30] on a 3x20 alt). A NARROWER line trips Buffer.resize's post-condition (`fatalError("A resized line is shorter than the buffer width")`) |
 | x, savedX | 0...cols | the cursor indexes the line |
 | y | 0..<rows | same |
@@ -1003,7 +1004,7 @@ exports showed (rows marked RELAXED). Each relaxed check has a comment so nobody
 | linesTop | 0...2^62 | it counts every line ever trimmed, so an honest value is not held to Int32. It is incremented (Terminal.swift:8761, :8893, importHistoryChunk) and added to row offsets (TerminalContentSnapshot.swift:565-576) |
 | scrollback | <= maximumScrollback (2^24) | import sets the line list's capacity: one slot per line (CircularList.swift:336) |
 | lineCapacity | rows <= cap <= (scrollback ?? 0) + 65535, and >= lines.count | same |
-| Σ line cols, both buffers | <= maximumCells (2^26, 512 MiB at 8 B per PackedCell) | import allocates each line's own width (BufferLine.swift:259). Without it, ~1 MB of 65535 x 65535 near-empty lines would allocate ~34 GB |
+| cells, both buffers | Σ over buffers of max(Σ line cols, rows x cols) <= maximumCells (2^26, 512 MiB at 8 B per PackedCell) | import allocates each line's own width (BufferLine.swift:259), and the grid is FILLED later even when fewer lines are held: at activation (fillViewportRows, Terminal.swift:1481 -> Buffer.swift:971-972) or row by row. Without the rows x cols term (P1), a hidden 65535 x 65535 alt with 0 lines passed the cap and the next CSI ? 1049 h allocated ~34 GB. Without the cap, ~1 MB of 65535 x 65535 near-empty lines would allocate ~34 GB at import |
 | cell code | 0, or a valid Unicode scalar | arena.pack fails, then preconditionFailure (TerminalStateSnapshot.swift:656-658) |
 | grapheme scalars | each a valid scalar, checked before truncation to UInt32 | same |
 | cell widthState | 0...3 | an invalid one skips the fast path and the general pack returns nil, then preconditionFailure |
@@ -1056,9 +1057,11 @@ decode (an error, never a crash). Export does not refuse them.
     it: CENSUS carried=105 corpus=57 hand=48 (was hand=49). The corpus now covers
     `terminalIconStack`, because a pushed empty title (`[""]`) used to describe the same as `[]`.
     Its hand row is deleted.
-  - **Still open:** a cell payload target containing '/' or '|' (TerminalReplicationDigest.swift:265-268).
+  - **Still open (record only, per the reader):** cell payload strings are still unquoted, so a target containing '/' or '|' can collide (TerminalReplicationDigest.swift:265-268).
   - **Still open:** a class nested in a carried struct prints as its type name.
 
 **macOS suite at the fix:** 2164 tests in 208 suites, 5 issues, all load-bound: `endCallbackDoesNotOverlapFinalParse` (3) and `testSynchronizedOutputTimeoutFromBackgroundFeed…` (2). XCTest 150/150. CENSUS carried=105 corpus=57 hand=48. **New to the load-bound list:** `ProgressReportTimeoutTests.shorteningTheTimeoutRearmsAWaitInFlight`. In the first loaded run (`run-b8-full-b10-fix4.log`) it failed with `ProgressReportTimeoutTests.swift:62:9: Expectation failed: progressBar(of: view)?.isHidden == false`. Alone it passes 3/3, as do the other load-bound tests and `theDefaultOutlastsAShortSilence` (`it2001-b/b10-alone.txt`).
 
 **Feed path at the fix** (`87692c1`, release SwiftTermProfile, `Tools/feed-path-disasm.py`): every section is the same as at `bfdcfc2` (`it2001-b/b10-disasm.log`), so the not-dirty one-byte path is still **47 = 47**. The only difference from U is the known D7 `$defer` (37 vs 43, the dirty-feed gate).
+
+**After the reader's P1** (fix on top of `91bd2f8`): macOS 2167 tests in 208 suites, 10 issues, all timing tests under load. Each is green alone 3/3: endCallback (3), SyncOutput background (2), theDefaultOutlastsAShortSilence (2), shorteningTheTimeout (1) (`b10-alone.txt`), plus two NEW to the load-bound list (`b10-alone2.txt`): `MetalRendererConcurrencyTests.cursorBlinkControllerOwnsTimerOnMainActor` (`:46:9: Expectation failed: redraws.withLock { $0 } > 0`) and `TerminalIOPipelineTests.interactiveTrickleIsDeliveredImmediately` (`:403:9: Expectation failed: pipeline.coalescingNaps == 0`). XCTest 150/150. CENSUS 105/57/48. The only Sources file changed is TerminalStateSnapshotCoding.swift (decode), so the feed-path disassembly was not re-run: it is the same as at `87692c1`.
