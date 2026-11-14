@@ -4,10 +4,8 @@ Branch `2001-upstream-merge-b`, fork PR #6. Merge of upstream `d4f52faaa` into t
 `scape-selection-api` at `7ec59163a`; merge commit `e768bfa77`. The plan (rev 3) asks for this
 record in section 6, item 6. Line numbers are at the head unless a line says otherwise.
 
-Sections are added as the work lands. Still to come: format v2 and the census (v1's numbers are
-first: 137 stored fields in 9 types, TerminalStateSnapshotCoding.swift 720 lines; more than about
-twice the fields means stop and go to the lead), C3's list of state changes with no byte, and the
-Linux baseline at the head.
+Sections are added as the work lands. Format v2, the census and the Pty close_range path are in
+the last two sections ("Format v2 and the census", "Pty: close_range on Linux").
 
 ## D4: export only at ground (lead 14's ruling (B))
 
@@ -686,8 +684,7 @@ sits on both sides. The facts:
   = 245760. That is the ~32 ms case: a dev build launched from a terminal pays it in the child, per
   session spawn.
 - A launchd-launched app with default limits (maxfiles 256) gets the 10240 floor.
-- Linux's number comes from the probe. The likely shape is close_range on Linux as an added `#if`;
-  nothing changes until that number is in.
+- Linux: measured at ~20.0 ms per session start; fixed with close_range (last section).
 
 **iOS is never built.** AppleTerminalView.swift's `queueSizeChange` / `processSizeChange` read
 `resizeSuspended` inside `#if os(macOS) || os(iOS) || os(visionOS)`, but only MacTerminalView.swift
@@ -719,3 +716,254 @@ The pin-bump PR and every later upstream merge re-run it and quote U against X.
   `renderLoopCoalesced`. Neither reads what was deleted.
 - Kept: `SynchronizedOutputWatchdog.armedGeneration` (read by SynchronizedOutputValveTests).
 - TerminalEventQueue.swift and FrameDriver.swift are upstream's again, byte for byte.
+
+## Format v2 and the census (builders #8 and #9; red `8c3e1e7`, `b373aa1`; leftovers red `bee4f64`, `bfdcfc2`)
+
+**One version, 2**, for both magics (STSS, STSH); version 1 is refused. The pending-parser-bytes
+field, its import-side feed, its coding and its doc line are gone (export happens only at ground).
+
+**The criterion.** A field is in the format if a reader of the replica can observe it: what is
+drawn, what the next byte does, what a query answers, or what a key at the viewer sends. A field
+that no parsed byte can change carries nothing between owner and replica, so it is not in the
+format. A field that import BUILDS the replica from is a construction parameter: it is carried
+and named as one. The census enforces this by reflection, in both directions
+(`ReplicationCensusTests.theCensusClassifiesEveryStoredPropertyBothWays`). Every stored property
+of `Terminal`, of the named holders `cold` and `reportedOnly`, of `Buffer` and of `BufferLine` is in
+exactly one of three classes: carried, construction parameter, or excluded with a sentence. A
+name in any class must also be a real stored property.
+
+**Carried (105 census paths), grouped by what a reader observes:**
+
+- **Drawn:**
+  - Buffers: cursor x/y, yBase/yDisp, linesTop.
+  - Lines: isWrapped, bidiState, renderMode, semantic marks, hard-continuation group.
+  - Cells: compared one by one, to full width.
+  - Terminal: curAttr, currentEraseAttribute, reverseColors, cursorHidden, cursorBlink,
+    ansiColors, foreground/background/cursor colours and the cold OSC 10/11 overrides,
+    terminalTitle/iconTitle and both title stacks, programStatusStore, _currentBidiState,
+    defaultBidiState.
+- **What the next byte does:**
+  - Charsets: charset, gCharsets, gLevel.
+  - Margins and wrap: margins and scroll region; origin, margin, insert, wraparound and
+    reverseWraparound(+Extended) modes; pendingWrap (restored last); cursorStartsNewGrapheme.
+  - Saved cursor: saved cursor, attr, charset, origin/margin/protection, pendingWrap.
+  - Other modes: tabStops; savedPrivateModes; lineFeedMode (LNM); characterProtection(Mode);
+    bulkInsertBlocked; noClearOnColumnChange; allow80To132; conformance; cc (S7C1T/S8C1T);
+    synchronizedOutputActive; the semantic prompt state.
+- **What a query answers:**
+  - Reported modes: reportedOnly.decModes, attributeChangeExtent, smoothScroll (DECSCLM is
+    reported by DECRQM), colorScheme and its updates flag.
+  - Title modes: the xterm title set/query modes.
+  - Host state: hostCurrentDirectory, hostCurrentDocument.
+  - Report flags: visibility, in-band size and kitty paste-event reports.
+- **What a key at the viewer sends:**
+  - Key modes: applicationCursor, applicationKeypad, both kitty keyboard modes,
+    backarrowKeyMode, keyboardActionMode, sendReceiveMode.
+  - Mouse and focus: mouseMode, mouseProtocol, mouseShiftCapture, sendFocus.
+  - Paste and scroll: bracketedPasteMode, alternateScrollMode, bidiArrowKeySwap, cold.moreFix.
+
+The authoritative sets are in `Tests/SwiftTermTests/ReplicationCensusTests.swift`
+(`carriedTerminal`, `carriedHolder`, `carriedBuffer`, `carriedLine`).
+
+**Construction parameter (1):** `Buffer.scrollback`. Import builds each buffer with the
+exporter's scrollback. The app's viewer replica is built with app options, and a smaller
+scrollback would silently drop history. Pinned by `aConstructionParameterIsTheOwnersAfterImport`:
+a replica made with scrollback 10 gets the owner's 50.
+
+**Excluded, with their sentences:** the three `digestExcluded*` tables in
+TerminalReplicationDigest.swift. Every entry has one sentence. These are the exclusions decided
+for v2 (builder #9 corrected the ones marked *):
+
+| Field | Why it is excluded |
+|---|---|
+| `_options` | The host's configuration. The cursor style an application changes is carried. |
+| `defaultCursorStyle` | The host's configuration. |
+| `installedColors`, `defaultAnsiColors` | The host's palette. |
+| `semanticPromptClickBehavior` | The host's choice of click routing. |
+| `settingFg/Bg/CursorColor` | Re-entrancy guards. They are false between feeds. |
+| `portableRender*`, `lineChanges` | Render caches. |
+| `payloads` | Atom identity. Payloads are compared by target. |
+| `cold.respondsToQueries` | The replica's role, not emulator state. |
+| `cold.synchronizedOutputTimeoutDisabled` | The host's choice of valve. |
+| `userScrolling` | View scroll state (lead ruling 20:01Z). |
+| `gcharset`* | No parsed byte writes it: it is 0 at init and at reset, and nothing reads it. |
+| `tabStopWidth`* | Always 8. Upstream never reads `TerminalOptions.tabStopWidth` (IT-2023). Reset and resize rebuild tab stops from it, so the day upstream honours the option it becomes a construction parameter. Pin `tabStopWidthIgnoresTheOptionSoItCarriesNothing` fails that day. |
+| `Buffer.xDisp`*, `Buffer.xBase`* | No parsed byte writes them (0 at init, and `xBase` 0 in `clear()`). SwiftTerm has no horizontal scroll. |
+| `Buffer.hasScrollback` | Derived from scrollback, which is carried. It was never encoded. |
+
+Builder #8's sentences for two fields were wrong. "smoothScroll: never set" and "lineFeedMode:
+only from convertEol" are false: CSI ? 4 h/l and CSI 20 h/l write them (Terminal.swift :7163,
+:7388, :7148, :7365), and DECRQM answers both. So the two are now CARRIED, each with a byte row.
+`gcharset`, `tabStopWidth`, `xDisp` and `xBase` left the format. Each commit quotes the field's
+write sites (`bfdcfc2`).
+
+**Three kinds reflection cannot see** (a hand audit, one line each):
+
+- **Static tables.** For example `Terminal.reportedOnlyDECModes` and the charset tables. They are
+  the same on both sides because they are code, not state.
+- **Unsafe-pointer storage.** Cell storage behind `BufferLine.storage` and the arena. Reflection
+  sees a pointer, so the digest compares cells by value, each line to its full width.
+- **Lazy caches.** For example the semantic prompt row cache and the render identity. They are
+  rebuilt on demand and are excluded by name as caches.
+
+**Coverage.** `everyCarriedFieldIsCoveredByTheCorpusOrOneHandRow` computes the set of hand rows
+it needs. The every-cut corpus covers 56 carried paths: at some cut the field differs from a fresh
+terminal's, and after export and import the digests are equal. The other 49 each have one hand
+row: 18 new in v2, 29 v1 strays, and lineFeedMode and smoothScroll. Every row now sets its state
+BY BYTES. Builder #8 thought three rows had to be written directly (hostCurrentDocument,
+savedPrivateModes, terminalIconStack), and it was wrong. The test's `fresh()` passed an inline
+`Sink()`, and Terminal holds its delegate weakly. So OSC 6 (`tdel?.isProcessTrusted ?? false`)
+and XTWINOPS (`guard let tdel`) did nothing. With the sink retained, OSC 6, `CSI ? 2004 h CSI ? 2004 s`
+(XTSAVE) and `OSC 1 ; icon BEL CSI 22 ; 1 t` each write their field. Upstream has no bug here.
+Tab stops a program sets (HTS/TBC) are corpus-covered, by the stream "modes, tabs, charsets,
+insert" (TerminalStateSnapshotTests.swift:168).
+
+**Field count and code size.**
+
+- Fields: 153 image-type fields plus 8 reused TerminalProgramStatus fields = 161 at `b373aa1`,
+  then 4 fewer at `bfdcfc2` = 157. v1 had 137; the lead's limit is 274.
+- Coding: 720 lines → 779 at `b373aa1`, with 6 lines changed at `bfdcfc2`.
+- Snapshot: 605 → 672 lines.
+
+**Sizes and times** (DEBUG build, 200×60 + 10,000 history lines, ReplicationSizeTime):
+
+| | v1 | `b373aa1` | `bfdcfc2` |
+|---|---|---|---|
+| screen part | 13,742 B | 13,760 B | 13,754 B |
+| unsplit | 2,293,818 B | 2,293,836 B | 2,293,830 B |
+| export under the lock (screen + history copy) | 19.0 ms | 19.5 ms | 19.4 ms |
+| screen decode + import | 7.3 ms | 7.3 ms | 7.6 ms |
+
+Every attach or resync holds the owner's feed for the export time. Scape #1289's gate records the
+RELEASE figure beside its wait counter. A release figure over one frame (about 16 ms) goes to the
+lead.
+
+**Import and the delegate.**
+
+- Delegate notifications during import see the new modes and buffers: the program status and the
+  three colours are set after the buffers are replaced (TerminalStateSnapshot.swift). The screen
+  is refreshed after them. Pin: `importTellsTheDelegateAfterTheBuffersAreReplaced`, which passed
+  at its red commit, so no reordering was needed.
+- `cursorColor` is carried as set. A host that writes it directly, not through the view's caret
+  colour, loses that value at import. Scape themes the view's caret and never writes it.
+
+## Pty: close_range on Linux (builder #9; red `692b0b5`, fix `3935ba0`)
+
+**Measured on Linux CI** (kernel 7.0, RLIMIT_NOFILE 65536). The child's close loop (close() for
+every fd from 3 up to `fdLimit = max(getdtablesize(), 10240)`) costs about **20.0 ms per session
+start**. `close_range(3, ~0U, 0)` costs **193 µs**, against a fork baseline of 185 µs. The loop's
+cost grows with the soft limit. At 1M it would be about 320 ms, but that figure is an
+extrapolation, not a measurement. A systemd-launched daemon's soft limit is commonly 1024, where
+the loop is cheap; the CI runner's limit is 65536.
+
+**The fix** (Pty.swift, 28 lines added, 0 removed, all inside `#if os(Linux)`; Darwin unchanged):
+
+- Swift cannot call the variadic `syscall()`, and the Glibc module declares `close_range` only
+  under `_GNU_SOURCE`. So `PseudoTerminalHelpers.closeRangeFunction` resolves it with
+  `dlopen(nil, RTLD_NOW)` + `dlsym`, once, as `@convention(c) (UInt32, UInt32, Int32) -> Int32`.
+  The precedent is Scape's ScapedLaunchContextProof.swift:370-372.
+- The parent reads that static into a local before `forkpty`, which forces its initialisation
+  there.
+- The child runs `if let closeRange, closeRange(3, UInt32.max, 0) == 0 { leakedFd = fdLimit }`
+  just before the existing loop, whose lines are unchanged. Nothing is looked up, allocated or
+  locked between fork and exec.
+- Any non-zero return (ENOSYS, EINVAL, or EPERM under seccomp), and a nil pointer (glibc older
+  than 2.34, or musl), leave the loop to run. No flags are passed.
+
+**The test** (`PtyInheritedDescriptorTests`):
+
+- A pipe end leaked at fd 200 without CLOEXEC is closed in the child, on both platforms and both
+  paths. fd 0 is the probe's control and must read open.
+- On Linux the child reports which path ran, and the product writes no byte for it. The test
+  leaks fd 20000 and lowers the soft limit to 10240 for one fork. The loop stops at fdLimit and
+  close_range does not, so the child's shell sees fd 20000 closed (close_range) or open (loop).
+- The test restores the limit on every exit path.
+- Every run prints `IT-2001 Pty close path: …` with the in-process close_range rc and errno.
+- The test fails only if close_range is present and works in-process but the child ran the loop.
+- The Mac run exercises the loop. Linux CI is the real test of the close_range path.
+
+## Whole-fork headless A/B after v2 (X = `bfdcfc2`, U = `d4f52faaa` + D9; builder #9)
+
+**Method** (lead 14, 02:20Z): judge by the per-iteration slope between 50 and 200 iterations, which
+cancels the launch cost. Both orders. Apple Swift 6.4 (swiftlang-6.4.0.34.1), arm64-apple-macosx27.0,
+release, `-align-all-functions=6`. Files: `ab3/b9-slope.tsv`, `b9r-`, `b9aa-`, `b9x7-`, `b9v1-slope.tsv`
+in the builder cache.
+
+**Launch** (no-argument run), X − U: +4.01 M (XY) / +4.42 M (YX). The earlier figure was +4.04 M, so
+v2's type metadata adds about 0 to +0.4 M instructions, once per process.
+
+**Feed path** (`Tools/feed-path-disasm.py`): the not-dirty one-byte feed is **47 = 47**.
+
+- `feed(byteArray:)` is identical to U's.
+- On the not-dirty path, parse's `$defer` runs 20 instructions in both, with the same branch targets.
+- The D7 gate sits only on the DIRTY path: 4 added instructions (a load of `cold`, a load of the
+  flag, a compare, a branch) before upstream's apply call. U has 11 instructions from the dirty
+  test to the call; X has 15.
+
+**Slope, 22 cases.** 20 cases are within ±0.31% in both orders, and their signs flip between orders.
+The scroll family runs from −0.31% to +0.005%, and osc_short_chunked is +0.007 / −0.012%.
+
+**medium_cells** first read +0.258 / −0.462. A 4-round recheck gave −0.011 / −0.003: inside.
+
+**sync_medium_cells** (4 rounds unless marked), slope as % of U's ~99.05 M instructions per
+iteration:
+
+| Tree vs U | XY | YX |
+|---|---|---|
+| X `bfdcfc2` (2 rounds) | +0.625 | +0.016 |
+| X `bfdcfc2` | +0.117 | +0.291 |
+| X7 `e4cc3ac`, before v2 | +0.022 | +0.111 |
+| V1 = X minus the D7 gate | +0.186 | −0.070 |
+| A/A: U vs U2 | −0.120 | −0.010 |
+
+One iteration is ONE feed call: the whole 1.11 MB sample, with no chunking. The sample holds 2,772
+DEC 2026 transitions, but begin and end only set the dirty flag while inside parse, so reconcile
+runs once. That is N = 1 dirty feed per iteration, and N × 4 = 4 instructions, against an excess
+of 100 to 300 K. Three findings follow:
+
+- The gate is not the cause: removing it (V1) leaves the same excess.
+- v2 is not the cause: X7, from before v2, shows the same order of excess.
+- The remainder sits at this method's resolution. A single 200-iteration run of U alone scatters
+  ±0.3% (20.836 to 21.097 G instructions), and the variants differ from each other by as much as
+  X differs from U.
+
+On this count, the lead's unruled alternative for D7 ("nil stored as a timeout that never comes
+due") would save at most 4 instructions per dirty feed, about 4 per iteration here. It is not
+reopened.
+
+The dirty path in parse's `$defer`, from the dirty test (`ldrb w8, [x20, #0x150]; cmp w8, #0x1;
+b.ne`) to upstream's apply call:
+
+    U (11)                                X (15)
+    strb wzr, [x20, #0x150]               strb wzr, [x20, #0x150]
+                                          ldr  x8, [x20, #0x3e0]    ; cold
+                                          ldrb w8, [x8, #0x39]      ; synchronizedOutputTimeoutDisabled
+                                          cmp  w8, #0x1
+                                          b.ne -> apply              ; else bl reconcileDisabled…; b exit
+    add  x0, x20, #0x140                  add  x0, x20, #0x140
+    add  x1, sp, #0x8                     add  x1, sp, #0x8
+    mov  x2, #0x0                         mov  x2, #0x0
+    mov  x3, #0x0                         mov  x3, #0x0
+    bl   swift_beginAccess                bl   swift_beginAccess
+    ldrb w0, [x20, #0x140]                ldrb w0, [x20, #0x140]
+    ldr  x1, [x20, #0x148]                ldr  x1, [x20, #0x148]
+    ldr  x8, [x20]                        ldr  x8, [x20]
+    ldr  x8, [x8, #0x17d0]                ldr  x8, [x8, #0x1850]
+    blr  x8                               blr  x8
+
+So the gate adds 4 instructions per DIRTY feed; the not-dirty path is 47 = 47.
+
+**The 8-round closing run** (X, U, U2; sync_medium_cells only; both orders). Its verdict rule was
+set before the run. The case is closed as "at the method's resolution, no attributable fork line"
+if X − U is inside the U − U2 spread in at least one order, or if its mean excess is under 0.1%. If
+it is above the A/A spread in both orders by more than 0.1%, the next step is a per-function
+instruction diff of the two binaries. Result:
+
+- X − U: +0.151% (XY) / +0.121% (YX).
+- A/A U − U2: −0.054% (XY) / +0.163% (YX).
+- In the YX order, X − U is inside the A/A spread. **Closed: at the method's resolution, no
+  attributable fork line.** (Files: `ab3/b9r8-slope.tsv`, `b9aa8-slope.tsv`.)
+
+**tabStopWidth after the drop.** Import reads it only through the read-only accessor
+`replicationTabStopWidth`, to BUILD the replica's buffers (construction). It is not carried. Fix
+`53a1884`, found by the full suite's ReplicationSourceScanTests at `bfdcfc2`.
