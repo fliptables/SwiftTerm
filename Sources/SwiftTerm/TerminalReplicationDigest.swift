@@ -55,13 +55,58 @@ extension Terminal {
         "semanticScanInPaste": "not carried: input-side scanner",
         "semanticScanParams": "not carried: input-side scanner",
         "activeHyperlink": "compared by target",
-        "payloadCodes": "atom identity (payloads are compared by target)",
         "silentLog": "logging",
         "reportedVisibility": "host visibility",
         "pixelGeometry": "host geometry",
         "kittyClipboardProtocol": "not carried: clipboard transactions",
         "kittyClipboardTokenGenerator": "clipboard plumbing",
         "kittyClipboardClock": "clipboard plumbing",
+        // IT-2001 format v2 census: state no reader of the replica can observe.
+        "_options": "the host's configuration: a replica is made with the owner's options (the cursor style an application changes is carried)",
+        "defaultCursorStyle": "the host's configuration, fixed at construction",
+        "semanticPromptClickBehavior": "the view's choice of click routing, set by the host",
+        "installedColors": "the host's palette",
+        "defaultAnsiColors": "the host's palette, derived from installedColors",
+        "settingFgColor": "re-entrancy guard, false between feeds",
+        "settingBgColor": "re-entrancy guard, false between feeds",
+        "settingCursorColor": "re-entrancy guard, false between feeds",
+        "portableRenderMetadata": "render cache",
+        "portableRenderCursor": "render cache",
+        "portableRenderCells": "render cache",
+        "lineChanges": "render change tracking",
+        "payloads": "atom identity, slots and collection thresholds (payloads are compared by target)",
+    ]
+    #if DEBUG
+    static let debugExcludedTerminalProperties: [String: String] = [
+        "testingInsertLineIterations": "test counter, DEBUG only",
+        "testingImplicitLinkCandidates": "test counter, DEBUG only",
+    ]
+    #else
+    static let debugExcludedTerminalProperties: [String: String] = [:]
+    #endif
+    #if os(WASI) && !SWIFTTERM_EMBEDDED
+    static let platformExcludedTerminalProperties: [String: String] = ["hostEventQueue": "host callback plumbing"]
+    #else
+    static let platformExcludedTerminalProperties: [String: String] = [:]
+    #endif
+
+    /// Every stored property of `Terminal` the digest leaves out, on this build.
+    @_spi(Replication)
+    public static var digestExcludedTerminalPropertiesOnThisBuild: [String: String] {
+        digestExcludedTerminalProperties.merging(debugExcludedTerminalProperties) { a, _ in a }
+            .merging(platformExcludedTerminalProperties) { a, _ in a }
+    }
+
+    /// Class-typed stored properties of `Terminal` whose own stored properties the digest
+    /// compares, as `holder.property` (plan P3: the digest descends only into named holders).
+    @_spi(Replication)
+    public static let digestHolders: [String] = ["cold", "reportedOnly"]
+
+    /// Properties of the named holders the digest leaves out, as `holder.property`.
+    @_spi(Replication)
+    public static let digestExcludedHolderProperties: [String: String] = [
+        "cold.respondsToQueries": "the replica's role, not emulator state",
+        "cold.synchronizedOutputTimeoutDisabled": "the host's choice of valve, not emulator state",
     ]
 
     /// Stored properties of `Buffer` the digest leaves out, with the reason.
@@ -77,6 +122,20 @@ extension Terminal {
         "semanticPromptRowScanCount": "diagnostic counter",
     ]
 
+    /// Every stored property of `Buffer` the digest leaves out, on this build.
+    @_spi(Replication)
+    public static var digestExcludedBufferPropertiesOnThisBuild: [String: String] {
+        #if DEBUG
+        digestExcludedBufferProperties.merging(["testingSemanticPromptRowVisits": "test counter, DEBUG only"]) { a, _ in a }
+        #else
+        digestExcludedBufferProperties
+        #endif
+    }
+
+    /// Separates the `label=value` parts of a digest line row, so a test can split them.
+    @_spi(Replication)
+    public static let digestLinePartSeparator = " ¦ "
+
     /// Stored properties of `BufferLine` the digest leaves out, with the reason.
     @_spi(Replication)
     public static let digestExcludedLineProperties: [String: String] = [
@@ -88,6 +147,7 @@ extension Terminal {
         "tailBlankCell": "compared as the tail attribute",
         "imagesValue": "not carried: images",
         "_generation": "render change counter",
+        "usedStart": "storage bound (cells are compared to the full width)",
     ]
 
     /// One line per compared fact, `path = value`, in a stable order. Two
@@ -96,10 +156,18 @@ extension Terminal {
     @_spi(Replication)
     public func replicationDigest() -> [String] {
         var out: [String] = []
-        let mirror = Mirror(reflecting: self)
-        for child in mirror.children {
-            guard let label = child.label,
-                  Terminal.digestExcludedTerminalProperties[label] == nil else { continue }
+        let excluded = Terminal.digestExcludedTerminalPropertiesOnThisBuild
+        for child in Terminal.terminalMirror(self).children {
+            guard let label = child.label, excluded[label] == nil else { continue }
+            if Terminal.digestHolders.contains(label) {
+                for field in Mirror(reflecting: child.value).children {
+                    guard let name = field.label else { continue }
+                    let path = "\(label).\(name)"
+                    guard Terminal.digestExcludedHolderProperties[path] == nil else { continue }
+                    out.append("terminal.\(path) = \(DigestDescriber.describe(field.value))")
+                }
+                continue
+            }
             out.append("terminal.\(label) = \(DigestDescriber.describe(child.value))")
         }
         out.append("terminal.altActive = \(isCurrentBufferAlternate)")
@@ -118,6 +186,15 @@ extension Terminal {
         return out
     }
 
+    /// The mirror of `terminal`'s `Terminal` part: a subclass's mirror lists only the
+    /// subclass's own stored properties.
+    @_spi(Replication)
+    public static func terminalMirror(_ terminal: Terminal) -> Mirror {
+        var mirror = Mirror(reflecting: terminal)
+        while mirror.subjectType != Terminal.self, let parent = mirror.superclassMirror { mirror = parent }
+        return mirror
+    }
+
     private func describeActiveHyperlink() -> String {
         // A resolved atom with no String target prints as `open(?)`, as before
         // IT-2001 PR A; the snapshot exports `""` for it.
@@ -130,8 +207,9 @@ extension Terminal {
 
     private static func digest(buffer: Buffer, name: String, attributes: inout DigestAttributes,
                                into out: inout [String]) {
+        let excluded = digestExcludedBufferPropertiesOnThisBuild
         for child in Mirror(reflecting: buffer).children {
-            guard let label = child.label, digestExcludedBufferProperties[label] == nil else { continue }
+            guard let label = child.label, excluded[label] == nil else { continue }
             out.append("\(name).\(label) = \(DigestDescriber.describe(child.value))")
         }
         let startRow = buffer.replicationSemanticPromptStartLine.flatMap { buffer.replicationAbsoluteRow(of: $0) }
@@ -147,7 +225,7 @@ extension Terminal {
             }
             parts.append("cols=\(line.count)")
             parts.append("tail=a\(attributes.id(line.replicationTailAttribute))")
-            out.append("\(name).line[\(row)] \(parts.joined(separator: " "))")
+            out.append("\(name).line[\(row)] \(parts.joined(separator: Terminal.digestLinePartSeparator))")
             // One cell: its scalars, width, width state, attribute number, hyperlink target,
             // semantic content code and protection, as bytes.
             var cells: [UInt8] = Array("\(name).line[\(row)].cells ".utf8)
@@ -206,8 +284,12 @@ struct DigestAttributes {
 /// Describes a value by reflection, sorting unordered collections so equal
 /// states describe equally.
 enum DigestDescriber {
+    /// Written where a value nests deeper than the digest describes. A replication test
+    /// fails on any digest line holding it, instead of comparing a truncated value.
+    static let depthExceeded = "<digest-depth-exceeded>"
+
     static func describe(_ value: Any, depth: Int = 0) -> String {
-        if depth > 8 { return "…" }
+        if depth > 8 { return depthExceeded }
         if let color = value as? Color {
             return "rgb(\(color.red),\(color.green),\(color.blue))"
         }

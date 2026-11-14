@@ -49,7 +49,9 @@ final class TerminalStateSnapshotTests {
     }
 
     /// Returns the first failing cut, or nil.
-    static func replicate(_ steps: [Step]) -> String? {
+    /// `atEqualSnapshot` sees the owner at every cut whose import gave an equal digest
+    /// (the census's coverage test collects the fields the corpus exercises there).
+    static func replicate(_ steps: [Step], atEqualSnapshot: ((Terminal) -> Void)? = nil) -> String? {
         let units = explode(steps)
         var resyncs = 0
         defer { if resyncs > 0 { print("streamed resyncs: \(resyncs)") } }
@@ -77,9 +79,14 @@ final class TerminalStateSnapshotTests {
             let replicaCapture = Capture()
             let replica = make(replicaCapture, responds: false)
             replica.importState(decoded)
-            if let diff = firstDifference(owner.replicationDigest(), replica.replicationDigest()) {
+            let ownerDigest = owner.replicationDigest()
+            if let line = ownerDigest.first(where: { $0.contains(DigestDescriber.depthExceeded) }) {
+                return "cut \(cut): the digest nests too deep: \(line.prefix(200))"
+            }
+            if let diff = firstDifference(ownerDigest, replica.replicationDigest()) {
                 return "cut \(cut) at the snapshot: \(diff)"
             }
+            atEqualSnapshot?(owner)
             for step in units[cut...] {
                 apply(step, to: owner)
                 apply(step, to: replica)
@@ -230,12 +237,14 @@ final class TerminalStateSnapshotTests {
 
     @Test func everyExclusionNamesARealProperty() {
         let terminal = Terminal(delegate: Capture())
-        let terminalLabels = Set(Mirror(reflecting: terminal).children.compactMap(\.label))
+        let terminalLabels = Set(Terminal.terminalMirror(terminal).children.compactMap(\.label))
         let bufferLabels = Set(Mirror(reflecting: terminal.buffer).children.compactMap(\.label))
         let lineLabels = Set(Mirror(reflecting: terminal.buffer.lines[0]).children.compactMap(\.label))
-        #expect(Set(Terminal.digestExcludedTerminalProperties.keys).subtracting(terminalLabels).isEmpty)
-        #expect(Set(Terminal.digestExcludedBufferProperties.keys).subtracting(bufferLabels).isEmpty)
+        #expect(Set(Terminal.digestExcludedTerminalPropertiesOnThisBuild.keys).subtracting(terminalLabels).isEmpty)
+        #expect(Set(Terminal.digestExcludedBufferPropertiesOnThisBuild.keys).subtracting(bufferLabels).isEmpty)
         #expect(Set(Terminal.digestExcludedLineProperties.keys).subtracting(lineLabels).isEmpty)
+        let holderLabels = Set(ReplicationCensusTests.reflectedHolderPaths(terminal))
+        #expect(Set(Terminal.digestExcludedHolderProperties.keys).subtracting(holderLabels).isEmpty)
     }
 
     @Test func aDifferentFormatVersionIsRefused() throws {

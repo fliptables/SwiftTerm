@@ -1,0 +1,219 @@
+#if !os(iOS) && !os(Windows)
+import Testing
+@_spi(Replication) @testable import SwiftTerm
+
+/// IT-2001 format v2: the field census. Every stored property that reflection shows on
+/// `Terminal` (and in the holders the digest names), `Buffer` and `BufferLine` is either
+/// CARRIED by the snapshot or EXCLUDED by the digest with a reason (TerminalReplicationDigest.swift),
+/// never both; and every name in either list is a real property (both ways).
+///
+/// A field is carried when a reader of the replica can observe it: what is drawn, what the
+/// next byte does, what a query would answer, what a key at the viewer sends.
+///
+/// The coverage test proves that each carried field is replicated: the every-cut corpus
+/// exercises most of them (the field differs from a fresh terminal's at a cut whose import
+/// gave equal digests); the rest each have a hand row. The hand set is computed: a carried
+/// field in neither set fails, and so does a hand row the corpus already covers.
+final class ReplicationCensusTests {
+    private final class Sink: TerminalDelegate {
+        func send(source: Terminal, data: ArraySlice<UInt8>) {}
+    }
+
+    // MARK: The census
+
+    static let carriedTerminal: Set<String> = [
+        "programStatusStore", "_cols", "_rows", "tabStopWidth", "synchronizedOutputActive",
+        "applicationKeypad", "applicationCursor", "reverseColors", "keyboardModeNormal", "keyboardModeAlt",
+        "sendFocus", "_currentBidiState", "bidiArrowKeySwap", "savedPrivateModes", "cursorHidden",
+        "originMode", "marginMode", "insertMode", "keyboardActionMode", "sendReceiveMode",
+        "backarrowKeyMode", "characterProtectionMode", "characterProtection", "wraparound",
+        "bracketedPasteMode", "alternateScrollMode", "colorSchemeUpdatesEnabled", "colorScheme",
+        "charset", "gCharsets", "gcharset", "reverseWraparound", "reverseWraparoundExtended",
+        "curAttr", "currentEraseAttribute", "gLevel", "cursorBlink", "allow80To132",
+        "noClearOnColumnChange", "lineFeedMode", "smoothScroll", "ansiColors", "cc",
+        "hostCurrentDirectory", "hostCurrentDocument", "mouseProtocol", "foregroundColor",
+        "backgroundColor", "cursorColor", "mouseMode", "mouseShiftCapture", "xtermTitleSetUtf",
+        "xtermTitleSetHex", "xtermTitleQueryUtf", "xtermTitleQueryHex", "conformance",
+        "cursorStartsNewGrapheme", "terminalTitle", "iconTitle", "terminalTitleStack",
+        "terminalIconStack", "visibilityReportsEnabled", "inBandSizeReportsEnabled",
+        "kittyPasteEventsEnabled",
+        // Named holders: their own properties are listed in carriedHolder.
+        "cold", "reportedOnly",
+    ]
+
+    static let carriedHolder: Set<String> = [
+        "cold.moreFix", "cold.foregroundOverride", "cold.backgroundOverride",
+        "reportedOnly.decModes", "reportedOnly.attributeChangeExtent",
+    ]
+
+    static let carriedBuffer: Set<String> = [
+        "xDisp", "_yDisp", "xBase", "_x", "_y", "_yBase", "linesTop", "_scrollBottom", "_scrollTop",
+        "tabStops", "savedX", "savedY", "savedOriginMode", "savedMarginMode", "savedCharacterProtection",
+        "savedPendingWrap", "_marginLeft", "_marginRight", "savedAttr", "savedCharset", "hasScrollback",
+        "_cols", "_rows", "scrollback", "insertMode", "characterProtection", "bulkInsertBlocked",
+        "marginMode", "wraparound", "semanticContent", "semanticInput", "semanticClickMode",
+        "semanticUsesSpecialCursorKeys", "pendingWrap", "semanticGroupCounter", "activeSemanticGroupID",
+        "defaultBidiState",
+    ]
+
+    static let carriedLine: Set<String> = [
+        "isWrappedValue", "bidiStateValue", "renderModeValue", "semanticMarksValue",
+        "semanticHardContinuationGroupValue",
+    ]
+
+    static func reflectedHolderPaths(_ terminal: Terminal) -> [String] {
+        var paths: [String] = []
+        for child in Terminal.terminalMirror(terminal).children {
+            guard let label = child.label, Terminal.digestHolders.contains(label) else { continue }
+            for field in Mirror(reflecting: child.value).children {
+                if let name = field.label { paths.append("\(label).\(name)") }
+            }
+        }
+        return paths
+    }
+
+    private static func check(_ what: String, reflected: [String], carried: Set<String>, excluded: Set<String>) {
+        let names = Set(reflected)
+        #expect(names.count == reflected.count, "\(what): a label appears twice")
+        #expect(carried.isDisjoint(with: excluded), "\(what) both carried and excluded: \(carried.intersection(excluded).sorted())")
+        let missing = names.subtracting(carried).subtracting(excluded)
+        #expect(missing.isEmpty, "\(what) neither carried nor excluded: \(missing.sorted())")
+        let stale = carried.union(excluded).subtracting(names)
+        #expect(stale.isEmpty, "\(what) census names that are not stored properties: \(stale.sorted())")
+    }
+
+    @Test func theCensusClassifiesEveryStoredPropertyBothWays() {
+        let terminal = Terminal(delegate: Sink())
+        let mirror = Terminal.terminalMirror(terminal)
+        Self.check("Terminal", reflected: mirror.children.compactMap(\.label), carried: Self.carriedTerminal,
+                   excluded: Set(Terminal.digestExcludedTerminalPropertiesOnThisBuild.keys))
+        Self.check("holders", reflected: Self.reflectedHolderPaths(terminal), carried: Self.carriedHolder,
+                   excluded: Set(Terminal.digestExcludedHolderProperties.keys))
+        Self.check("Buffer", reflected: Mirror(reflecting: terminal.buffer).children.compactMap(\.label),
+                   carried: Self.carriedBuffer, excluded: Set(Terminal.digestExcludedBufferPropertiesOnThisBuild.keys))
+        Self.check("BufferLine", reflected: Mirror(reflecting: terminal.buffer.lines[0]).children.compactMap(\.label),
+                   carried: Self.carriedLine, excluded: Set(Terminal.digestExcludedLineProperties.keys))
+        // A named holder must be there, as a class instance, when the digest reflects it.
+        for holder in Terminal.digestHolders {
+            let value = mirror.children.first { $0.label == holder }?.value
+            #expect(value.map { Mirror(reflecting: $0).displayStyle == .class } == true, "holder \(holder) is missing or not a class")
+        }
+    }
+
+    // MARK: Coverage
+
+    /// The digest's per-field lines as `census path -> values`. Buffer and line values carry
+    /// their buffer's name, so a field that differs only on the alternate screen counts.
+    static func fields(_ digest: [String]) -> [String: Set<String>] {
+        var out: [String: Set<String>] = [:]
+        for line in digest {
+            if line.hasPrefix("terminal.") {
+                guard let eq = line.range(of: " = ") else { continue }
+                out["terminal." + line[line.index(line.startIndex, offsetBy: 9)..<eq.lowerBound], default: []]
+                    .insert(String(line[eq.upperBound...]))
+                continue
+            }
+            for buffer in ["normal", "alt"] where line.hasPrefix(buffer + ".") {
+                let rest = line.dropFirst(buffer.count + 1)
+                if rest.hasPrefix("line[") {
+                    guard !rest.contains("].cells "), let space = rest.firstIndex(of: " ") else { break }
+                    for part in rest[rest.index(after: space)...].components(separatedBy: Terminal.digestLinePartSeparator) {
+                        guard let eq = part.firstIndex(of: "=") else { continue }
+                        out["line." + part[..<eq], default: []].insert(buffer + ":" + part[part.index(after: eq)...])
+                    }
+                } else if let eq = rest.range(of: " = ") {
+                    out["buffer." + rest[..<eq.lowerBound], default: []].insert(buffer + ":" + rest[eq.upperBound...])
+                }
+            }
+        }
+        return out
+    }
+
+    static var carriedPaths: Set<String> {
+        Set(carriedTerminal.subtracting(Terminal.digestHolders).map { "terminal." + $0 })
+            .union(carriedHolder.map { "terminal." + $0 })
+            .union(carriedBuffer.map { "buffer." + $0 })
+            .union(carriedLine.map { "line." + $0 })
+    }
+
+    static func fresh() -> Terminal {
+        let terminal = Terminal(delegate: Sink(), options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
+        terminal.synchronizedOutputTimeout = nil
+        return terminal
+    }
+
+    static func changed(_ terminal: Terminal, against base: [String: Set<String>]) -> Set<String> {
+        let now = fields(terminal.replicationDigest())
+        return Set(now.keys.filter { now[$0] != base[$0] })
+    }
+
+    /// The carried fields the every-cut corpus changes at a cut whose import gave equal digests.
+    static func corpusCoverage() -> (covered: Set<String>, failures: [String]) {
+        let base = fields(fresh().replicationDigest())
+        var covered: Set<String> = []
+        var failures: [String] = []
+        let streams = TerminalStateSnapshotTests.corpus.map { ($0.0, $0.1) }
+            + ParserBoundaryTests.clauses.map { ($0.0, [TerminalStateSnapshotTests.Step.bytes($0.1)]) }
+        for (name, steps) in streams {
+            if let failure = TerminalStateSnapshotTests.replicate(steps, atEqualSnapshot: { owner in
+                covered.formUnion(changed(owner, against: base))
+            }) {
+                failures.append("\(name): \(failure.prefix(200))")
+            }
+        }
+        return (covered.intersection(carriedPaths), failures)
+    }
+
+    private static func b(_ text: String) -> @Sendable (Terminal) -> Void { { $0.feed(text: text) } }
+
+    /// One row per carried field the corpus does not change: how to change it on a fresh terminal.
+    static let handRows: [String: @Sendable (Terminal) -> Void] = [
+        "terminal.keyboardActionMode": b("\u{1b}[2h"),
+        "terminal.sendReceiveMode": b("\u{1b}[12l"),
+        "terminal.backarrowKeyMode": b("\u{1b}[?67h"),
+        "terminal.characterProtectionMode": b("\u{1b}[1\"q"),
+        "terminal.characterProtection": b("\u{1b}[1\"q"),
+        "terminal.reverseWraparoundExtended": b("\u{1b}[?1045h"),
+        "terminal.noClearOnColumnChange": b("\u{1b}[?95h"),
+        "terminal.reportedOnly.decModes": b("\u{1b}[?18h"),
+        "terminal.reportedOnly.attributeChangeExtent": b("\u{1b}[2*x"),
+        "terminal.cold.moreFix": b("\u{1b}[?41h"),
+        "terminal.cold.foregroundOverride": b("\u{1b}]10;rgb:11/22/33\u{7}"),
+        "terminal.foregroundColor": b("\u{1b}]10;rgb:11/22/33\u{7}"),
+        "terminal.cold.backgroundOverride": b("\u{1b}]11;rgb:44/55/66\u{7}"),
+        "terminal.backgroundColor": b("\u{1b}]11;rgb:44/55/66\u{7}"),
+        "terminal.cursorColor": b("\u{1b}]12;rgb:77/88/99\u{7}"),
+        "buffer.savedPendingWrap": b(String(repeating: "x", count: 30) + "\u{1b}7"),
+        "buffer.savedCharacterProtection": b("\u{1b}[1\"q\u{1b}7"),
+        "buffer.characterProtection": b("\u{1b}[1\"q"),
+    ]
+
+    @Test func everyCarriedFieldIsCoveredByTheCorpusOrOneHandRow() {
+        let (covered, failures) = Self.corpusCoverage()
+        #expect(failures.isEmpty, "corpus streams that do not replicate: \(failures)")
+        let needed = Self.carriedPaths.subtracting(covered)
+        let rows = Set(Self.handRows.keys)
+        #expect(rows.subtracting(needed).isEmpty, "hand rows the corpus already covers (delete them): \(rows.subtracting(needed).sorted())")
+        #expect(needed.subtracting(rows).isEmpty, "carried fields in neither the corpus nor a hand row: \(needed.subtracting(rows).sorted())")
+        print("CENSUS carried=\(Self.carriedPaths.count) corpus=\(covered.count) hand=\(rows.count)")
+    }
+
+    /// A hand row changes its field on a fresh terminal (two terminals differing there digest
+    /// differently), and export then import makes the replica's digest equal the owner's.
+    @Test(arguments: handRows.keys.sorted())
+    func aHandRowReplicates(_ path: String) throws {
+        let base = Self.fields(Self.fresh().replicationDigest())
+        let owner = Self.fresh()
+        Self.handRows[path]!(owner)
+        #expect(Self.changed(owner, against: base).contains(path), "\(path): the row does not change its field")
+        let snapshot = try #require(owner.exportState())
+        let replica = Self.fresh()
+        replica.respondsToQueries = false
+        replica.importState(try TerminalStateSnapshot(encoded: snapshot.encoded()))
+        let ownerFields = Self.fields(owner.replicationDigest())
+        let replicaFields = Self.fields(replica.replicationDigest())
+        #expect(ownerFields[path] == replicaFields[path], "\(path): owner \(ownerFields[path] ?? []) replica \(replicaFields[path] ?? [])")
+        #expect(owner.replicationDigest() == replica.replicationDigest(), "\(path): the digests differ elsewhere")
+    }
+}
+#endif
