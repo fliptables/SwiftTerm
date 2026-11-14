@@ -436,8 +436,12 @@ guard: HostSession.swift:333 `guard !ended, terminal.expireSynchronizedOutput() 
   the watchdog dirty and, at `parseDepth == 0`, reconciles; that reaches upstream's
   `guard active else { synchronizedOutputTimeoutItem.cancel(); … }`. A callback already past the
   cancel is stopped by `synchronizedOutputWatchdogFired`'s active and generation checks. Pin:
-  `SynchronizedOutputValveTests.aLateTimerAfterAHostExpiryChangesNothing` (red with the generation
-  check planted out: 3 issues).
+  `SynchronizedOutputValveTests.aLateTimerAfterAHostExpiryChangesNothing`. It pins behaviour that
+  was already correct, so its red (3 issues) was observed through a TEMPORARY EDIT IN THE WORKTREE:
+  the generation check in `synchronizedOutputWatchdogFired` replaced by `generation == generation`.
+  The edit was removed before the commit (`18c6526`; `git status` showed only the test changed).
+  Lloyd's correction: such mutants belong only in a scratch copy under the cache dir, unless Nash
+  says yes.
 - **`fired == 1` became `fired == 0`** in `ReplicationPrimitivesTests.expiringTheValve…`: upstream's
   valve is not the timer. The test still asserts the outcome beside the counter (active before,
   not after, and still not after a second call). The test with a view (pin 3) asserts that the view
