@@ -181,8 +181,18 @@ final class ReplicationFormatV2Tests {
         let unedited = snapshot.encoded()
         #expect(throws: Never.self, "\(what): the unedited snapshot") { _ = try TerminalStateSnapshot(encoded: unedited) }
         edit(&snapshot)
-        let bytes = snapshot.encoded()
-        #expect(throws: TerminalStateSnapshotError.self, "\(what) decoded") { try TerminalStateSnapshot(encoded: bytes) }
+        expectRefused(what, snapshot.encoded())
+    }
+
+    /// Records a short issue when `bytes` decode (not the decoded value, which can be huge).
+    private static func expectRefused(_ what: String, _ bytes: [UInt8]) {
+        do {
+            _ = try TerminalStateSnapshot(encoded: bytes)
+            Issue.record("\(what) decoded")
+        } catch is TerminalStateSnapshotError {
+        } catch {
+            Issue.record("\(what): unexpected error \(error)")
+        }
     }
 
     /// (a) Terminal keeps exactly four G0-G3 sets (Terminal.swift setup), and gLevel indexes them.
@@ -338,12 +348,9 @@ final class ReplicationFormatV2Tests {
 
     /// Imports `snapshot` and drives every reader of the relaxed fields: DECRC on both buffers,
     /// a scroll, resizes both ways (savedY arithmetic in resize and reflow), an alternate
-    /// screen round trip and an export. A trap here fails the whole run.
-    /// `replicaExportDecodes` is false for a screen part imported without its chunks: that
-    /// replica holds fewer lines than rows and exports them with no history pending (observed
-    /// 40x12 holding 8 lines after the drive), a state no owner exports. Its export must still
-    /// not trap.
-    private static func survives(_ snapshot: TerminalStateSnapshot, replicaExportDecodes: Bool = true) throws {
+    /// screen round trip and an export, which must decode: validate accepts what import
+    /// produces. A trap here fails the whole run.
+    private static func survives(_ snapshot: TerminalStateSnapshot) throws {
         let decoded: TerminalStateSnapshot
         do { decoded = try TerminalStateSnapshot(encoded: snapshot.encoded()) } catch {
             Issue.record("the snapshot itself did not decode: \(error) \(summary(snapshot))"); return
@@ -356,9 +363,7 @@ final class ReplicationFormatV2Tests {
         replica.resize(cols: 40, rows: 12)
         replica.feed(text: "\u{1b}8w")
         let again = try #require(replica.exportState())
-        if replicaExportDecodes {
-            #expect(throws: Never.self, "the replica's export: \(summary(again))") { _ = try TerminalStateSnapshot(encoded: again.encoded()) }
-        }
+        #expect(throws: Never.self, "the replica's export: \(summary(again))") { _ = try TerminalStateSnapshot(encoded: again.encoded()) }
     }
 
     /// The relaxed savedY (no grid check) at its accepted extremes imports and survives.
@@ -370,12 +375,49 @@ final class ReplicationFormatV2Tests {
         }
     }
 
-    /// The relaxed view (yBase, yDisp up to lines.count, past lines.count - rows) imports and survives.
     /// Upstream resizes the alternate buffer on every resize (Terminal.resizeBuffers); only the
     /// normal buffer is deferred, and only while the alternate screen is active. A hidden grid is
     /// FILLED at its next activation (fillViewportRows: rows lines of cols cells), and an active
     /// one fills its missing rows lazily, so the cap counts rows x cols as well as the lines held.
     /// Decode only; never imported.
+    /// The cap counts CAPACITY: a buffer fills to lineCapacity lines of at least
+    /// max(buffer cols, modes cols) as output scrolls. One line held, capacity 2^24, 65535 cols
+    /// would pass a count of the lines held and the grid. Decode only; never imported.
+    @Test func decodeRefusesACapacityPastTheCellCap() throws {
+        try Self.refuses("one line, capacity 2^24, 65535 cols") { snapshot in
+            let cols = 65535
+            snapshot.modes.cols = cols
+            for alternate in [false, true] {
+                var buffer = alternate ? snapshot.alt : snapshot.normal
+                buffer.cols = cols
+                buffer.tabStops = Array(repeating: false, count: cols)
+                buffer.marginRight = cols - 1
+                if !alternate {
+                    var line = buffer.lines[buffer.lines.count - 1]
+                    line.cols = cols; line.cells = []
+                    buffer.lines = [line]
+                    buffer.scrollback = 1 << 24
+                    buffer.lineCapacity = 1 << 24
+                    buffer.yBase = 0; buffer.yDisp = 0; buffer.y = 0
+                    buffer.semanticPromptStartRow = nil
+                }
+                if alternate { snapshot.alt = buffer } else { snapshot.normal = buffer }
+            }
+        }
+    }
+
+    /// The alternate buffer never has scrollback (Terminal.swift setup), so it never has history
+    /// still to come.
+    @Test func decodeRefusesScrollbackOrPendingHistoryOnTheAlt() throws {
+        try Self.refuses("alt scrollback") { $0.alt.scrollback = 10 }
+        try Self.refuses("alt pending history") { $0.alt.pendingHistoryLines = 1 }
+        try Self.refuses("pending history without scrollback") { snapshot in
+            snapshot.normal.scrollback = nil
+            snapshot.normal.lineCapacity = snapshot.normal.lines.count
+            snapshot.normal.pendingHistoryLines = 1
+        }
+    }
+
     @Test func decodeRefusesAGridThatFillsPastTheCellCap() throws {
         try Self.refuses("a hidden alt grid past the cap, no lines") { snapshot in
             let side = 65535
@@ -420,6 +462,36 @@ final class ReplicationFormatV2Tests {
         }
     }
 
+    /// A hidden normal buffer is WIDENED to the modes' cols when it is shown again (CSI ? 1049 l:
+    /// resizeNormalBufferToCurrentGridIfNeeded, then Buffer.resize widens every held line), so
+    /// the cap counts each line at least at the modes' cols. 1 col x 80000 lines under a
+    /// 65535-col grid is ~1 MB encoded and ~42 GB at the next 1049 l. Decode only; never imported.
+    @Test func decodeRefusesAHiddenNormalThatWidensPastTheCellCap() throws {
+        let owner = Self.make()
+        owner.feed(text: (0..<20).map { "line \($0)\r\n" }.joined() + "\u{1b}[?1049halt")
+        var snapshot = try #require(owner.exportState())
+        #expect(throws: Never.self) { _ = try TerminalStateSnapshot(encoded: snapshot.encoded()) }
+        let cols = 65535, count = 80_000
+        snapshot.modes.cols = cols
+        snapshot.alt.cols = cols
+        for i in snapshot.alt.lines.indices { snapshot.alt.lines[i].cols = cols }
+        snapshot.alt.tabStops = Array(repeating: false, count: cols)
+        snapshot.alt.marginRight = cols - 1
+        var normal = snapshot.normal
+        var line = normal.lines[normal.lines.count - 1]
+        line.cols = 1; line.cells = []
+        normal.cols = 1
+        normal.lines = Array(repeating: line, count: count)
+        normal.scrollback = count
+        normal.lineCapacity = count + normal.rows
+        normal.x = 0; normal.savedX = 0; normal.marginLeft = 0; normal.marginRight = 0
+        normal.tabStops = [false]
+        normal.yBase = count - normal.rows; normal.yDisp = normal.yBase
+        normal.semanticPromptStartRow = nil
+        snapshot.normal = normal
+        Self.expectRefused("a 1-col hidden normal of 80000 lines", snapshot.encoded())
+    }
+
     /// The alternate buffer always has the modes' grid; only the normal buffer, hidden under
     /// the alternate screen, may keep an older one. Only the inactive alternate buffer may be empty.
     @Test func decodeRefusesAHiddenGridUpstreamNeverLeaves() throws {
@@ -441,9 +513,10 @@ final class ReplicationFormatV2Tests {
         }
     }
 
-    /// The relaxed "lines + pending history >= rows", driven: the honest screen part of an
-    /// alternate buffer grown by a resize (8 lines for 14 rows), imported before any chunk, and
-    /// the extreme, one line with rows - 1 still to come.
+    /// "validate accepts what import produces" (lines.count >= 1), driven: the honest screen part
+    /// after an alternate buffer grew by a resize (its history, yBase 6 of 14 lines, now goes
+    /// WHOLE in the screen part: no scrollback, no chunks; it used to be left out as 6 pending),
+    /// imported before any normal chunk, and the extreme, one line with rows - 1 still to come.
     @Test func aScreenPartWithHistoryStillToComeSurvives() throws {
         let owner = Self.make()
         let history = (0..<60).map { "line \($0)\r\n" }.joined()
@@ -451,16 +524,18 @@ final class ReplicationFormatV2Tests {
         owner.resize(cols: 45, rows: 14)
         owner.feed(text: "z")
         let screen = try #require(owner.exportForStreaming()).screen
-        #expect(screen.alt.lines.count < screen.alt.rows, "\(Self.summary(screen))")
-        try Self.survives(screen, replicaExportDecodes: false)
+        #expect(screen.alt.pendingHistoryLines == 0 && screen.alt.lines.count >= screen.alt.rows, "\(Self.summary(screen))")
+        #expect(screen.normal.pendingHistoryLines > 0, "\(Self.summary(screen))")
+        try Self.survives(screen)
         var extreme = try Self.validSnapshot()
         extreme.normal.pendingHistoryLines = extreme.normal.rows - 1
         extreme.normal.lines = [extreme.normal.lines[extreme.normal.lines.count - 1]]
         extreme.normal.yBase = 0; extreme.normal.yDisp = 0; extreme.normal.y = 0
         extreme.normal.semanticPromptStartRow = nil
-        try Self.survives(extreme, replicaExportDecodes: false)
+        try Self.survives(extreme)
     }
 
+    /// The relaxed view (yBase, yDisp up to lines.count, past lines.count - rows) imports and survives.
     @Test func aViewAtTheLinesHeldSurvives() throws {
         var snapshot = try Self.validSnapshot()
         snapshot.normal.yBase = snapshot.normal.lines.count
@@ -533,12 +608,16 @@ final class ReplicationFormatV2Tests {
             var chunk = valid
             edit(&chunk)
             let bytes = chunk.encoded()
-            #expect(throws: TerminalStateSnapshotError.self, "\(what) decoded") { try TerminalHistoryChunk(encoded: bytes) }
+            do { _ = try TerminalHistoryChunk(encoded: bytes); Issue.record("\(what) decoded") } catch {}
         }
         refuses("zero cols") { $0.bufferCols = 0 }
         refuses("zero rows") { $0.bufferRows = 0 }
         refuses("a line narrower than the buffer") { $0.lines[0].cols = 29 }
-        // Import builds every line at its width before trimming: 1100 x 65535 > maximumCells.
+        // History streams only for a buffer with scrollback, whose every line has the buffer's
+        // cols (the widen loop and the narrow path resize all lines): no alt chunk, no wider line.
+        refuses("an alternate-buffer chunk") { $0.isAlternateBuffer = true }
+        refuses("a line wider than the buffer") { $0.lines[0].cols = 31 }
+        // Import used to build every line before trimming: 1100 x 65535 > maximumCells.
         // Decode only; never imported.
         refuses("cells past the cap") { chunk in
             var wide = chunk.lines[0]
