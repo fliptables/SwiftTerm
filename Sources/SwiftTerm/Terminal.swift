@@ -631,8 +631,10 @@ open class Terminal {
     /// Whether the DEC 2026 safety valve is armed, and after how long. The default (1 s) is the
     /// valve that unfreezes a display an application left frozen. `nil` never arms it: a
     /// replica sets that, because the terminal that owns the child decides when the valve
-    /// opens and sends it as an ordered event (``expireSynchronizedOutput()``); a test sets it
-    /// so no comparison depends on wall-clock time. Set it under `terminalLock`.
+    /// opens and sends it as an ordered event (``expireSynchronizedOutput()``, upstream's;
+    /// whether the mode was open is ``synchronizedOutputActive`` read just before the call,
+    /// both under `terminalLock`); a test sets it so no comparison depends on wall-clock
+    /// time. Set it under `terminalLock`.
     ///
     /// With `nil`, DEC 2026 ends only by the application's reset or by a call to
     /// ``expireSynchronizedOutput()``; a view shows the held frame until then. Setting
@@ -667,21 +669,6 @@ open class Terminal {
     private var synchronizedOutputTimeoutDisabled: Bool {
         get { cold.synchronizedOutputTimeoutDisabled }
         set { cold.synchronizedOutputTimeoutDisabled = newValue }
-    }
-
-    /// Opens the DEC 2026 valve now, as the safety timer would: ends synchronized output if it
-    /// is active. A replica applies the owner's "the valve opened" event with this, at the same
-    /// point in the stream. Returns whether the mode was active. Call under `terminalLock`.
-    @discardableResult
-    public func expireSynchronizedOutput() -> Bool {
-        guard synchronizedOutputActive else { return false }
-#if !SWIFTTERM_EMBEDDED
-        synchronizedOutputTimeoutItem?.cancel()
-        synchronizedOutputTimeoutItem = nil
-        synchronizedOutputWatchdogCounters.fired += 1
-#endif
-        endSynchronizedOutput()
-        return true
     }
     public private(set) var synchronizedOutputActive: Bool = false
     private(set) var synchronizedOutputGeneration: UInt64 = 0
@@ -9262,67 +9249,40 @@ open class Terminal {
         }
     }
 
-    /// What a watchdog does with one update (IT-2001 D7, proof P1).
-    enum SynchronizedOutputWatchdogDecision: Equatable {
-        /// Arm a timer for the open window, or rearm the outstanding one.
-        case requestTimer
-        /// Cancel the outstanding timer.
-        case cancel
-        /// Leave everything as it is.
-        case nothing
-    }
-
-    /// The one decision behind every watchdog branch (the normal build's own
-    /// timer, the Embedded host timer, and the view's watchdog through
-    /// ``reconcileSynchronizedOutputWatchdog()``): a timer only for an open
-    /// window while the timeout is not `nil`; otherwise cancel one that is
-    /// armed. `armed` says whether the deciding branch has a timer outstanding.
-    static func synchronizedOutputWatchdogDecision(
-        active: Bool, timeoutIsNil: Bool, armed: Bool) -> SynchronizedOutputWatchdogDecision
-    {
-        if active && !timeoutIsNil { return .requestTimer }
-        return armed ? .cancel : .nothing
-    }
-
     /// The only caller of ``applySynchronizedOutputWatchdog(active:generation:)``,
-    /// and the gate (IT-2001 D7): with the timeout `nil` every receiver is told
-    /// "not active", so none arms. `synchronizedOutputActive`, which the views
-    /// read to hold their display, is untouched. `final`: an override would
-    /// bypass the gate.
-    final func reconcileSynchronizedOutputWatchdog () {
+    /// and the gate (IT-2001 D7): with the timeout `nil` every receiver (the
+    /// normal build's timer, the Embedded host timer request, the view's
+    /// watchdog) is told "not active", so none arms and an armed one is
+    /// cancelled. `synchronizedOutputActive`, which the views read to hold their
+    /// display, is untouched. No subclass overrides it (source pin).
+    func reconcileSynchronizedOutputWatchdog () {
         guard synchronizedOutputWatchdogDirty else { return }
         synchronizedOutputWatchdogDirty = false
-        let decision = Terminal.synchronizedOutputWatchdogDecision(
-            active: synchronizedOutputActive,
-            timeoutIsNil: synchronizedOutputTimeoutDisabled,
-            armed: false)
+        // IT-2001 D7: the gate, before upstream's call below.
+        if synchronizedOutputTimeoutDisabled {
+            applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)
+            return
+        }
         applySynchronizedOutputWatchdog(
-            active: decision == .requestTimer,
+            active: synchronizedOutputActive,
             generation: synchronizedOutputGeneration)
     }
 
     func applySynchronizedOutputWatchdog(active: Bool, generation: UInt64) {
 #if SWIFTTERM_EMBEDDED
-        // The host's timer: requested only on the decision's result. Nothing
-        // here can withdraw an earlier request (see `synchronizedOutputTimeout`).
-        if Terminal.synchronizedOutputWatchdogDecision(active: active, timeoutIsNil: synchronizedOutputTimeoutDisabled, armed: false) == .requestTimer {
+        if active {
             tdel?.scheduleSynchronizedOutputTimeout(source: self, afterMilliseconds: 1_000)
         }
 #else
-        switch Terminal.synchronizedOutputWatchdogDecision(
-            active: active,
-            timeoutIsNil: synchronizedOutputTimeoutDisabled,
-            armed: synchronizedOutputTimeoutItem != nil) {
-        case .cancel:
-            synchronizedOutputTimeoutItem?.cancel()
-            synchronizedOutputTimeoutItem = nil
-            synchronizedOutputWatchdogCounters.cancelled += 1
+        guard active else {
+            if let synchronizedOutputTimeoutItem {
+                synchronizedOutputTimeoutItem.cancel()
+                self.synchronizedOutputTimeoutItem = nil
+                synchronizedOutputWatchdogCounters.cancelled += 1
+            }
             return
-        case .nothing:
-            return
-        case .requestTimer:
-            break
         }
+
         if synchronizedOutputTimeoutItem == nil {
             synchronizedOutputWatchdogCounters.armed += 1
         } else {
@@ -9360,8 +9320,7 @@ open class Terminal {
 #endif
     }
 
-    // IT-2001: D7. Upstream's `expireSynchronizedOutput()` (returning Void) is removed;
-    // the fork's `expireSynchronizedOutput() -> Bool` above is the one valve entry point.
+    public func expireSynchronizedOutput() { endSynchronizedOutput() }
 #if os(WASI) && !SWIFTTERM_EMBEDDED
     /// Cancel pending browser callbacks before the host releases this terminal.
     public func cancelHostEvents() {

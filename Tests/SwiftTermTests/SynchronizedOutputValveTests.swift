@@ -25,7 +25,9 @@ final class SynchronizedOutputValveTests {
 
     private static let open = "\u{1b}[?2026h"
 
-    // Pin 1: plain Terminal, nil from the start, DEC 2026 open.
+    // Pin 1: plain Terminal, nil from the start, DEC 2026 open. The valve is
+    // upstream's `expireSynchronizedOutput()`: active before the call, not
+    // after; a second call changes nothing (lead 14, 2026-11-14).
     @Test func aPlainTerminalWithNilStaysOpenAndArmsNothing() {
         let recorder = Recorder()
         let terminal = Terminal(delegate: recorder)
@@ -34,10 +36,12 @@ final class SynchronizedOutputValveTests {
 
         #expect(terminal.synchronizedOutputActive)
         #expect(terminal.synchronizedOutputWatchdogCounters.armed == 0)
-        #expect(terminal.expireSynchronizedOutput() == true)
+        terminal.expireSynchronizedOutput()
         #expect(!terminal.synchronizedOutputActive)
-        #expect(terminal.expireSynchronizedOutput() == false)
+        terminal.expireSynchronizedOutput()
+        #expect(!terminal.synchronizedOutputActive)
         #expect(recorder.changes == [true, false])
+        #expect(terminal.synchronizedOutputWatchdogCounters.armed == 0)
     }
 
     // Pin 4: arm, set nil, deliver the old callback (plain Terminal). The work
@@ -74,50 +78,43 @@ final class SynchronizedOutputValveTests {
         #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 1)
     }
 
-    // Pin 7: the decision "request a timer, cancel, or nothing" is one pure
-    // function of (active, timeout is nil, armed), used by all three branches.
-    @Test func theWatchdogDecisionTable() {
-        typealias T = Terminal
-        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: false, armed: false) == .requestTimer)
-        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: false, armed: true) == .requestTimer)
-        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: true, armed: false) == .nothing)
-        #expect(T.synchronizedOutputWatchdogDecision(active: true, timeoutIsNil: true, armed: true) == .cancel)
-        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: false, armed: false) == .nothing)
-        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: false, armed: true) == .cancel)
-        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: true, armed: false) == .nothing)
-        #expect(T.synchronizedOutputWatchdogDecision(active: false, timeoutIsNil: true, armed: true) == .cancel)
-    }
-
-    // Pin 6, the narrowed Embedded guarantee, through the decision's seam:
-    // the host-timer branch requests on `decision(...) == .requestTimer` with
-    // `armed: false` (source pin below). Across windows and re-entry into
-    // DEC 2026, one request is recorded per window while a value is set and
-    // none after nil.
-    @Test func theHostTimerIsRequestedOnlyWhileAValueIsSet() {
-        var requests = 0
-        func window(timeoutIsNil: Bool) {
-            for active in [true, true, false] where Terminal.synchronizedOutputWatchdogDecision(
-                active: active, timeoutIsNil: timeoutIsNil, armed: false) == .requestTimer {
-                requests += 1
-            }
+    // Pin 6, the narrowed Embedded guarantee, by behaviour of the gate: every
+    // receiver of the watchdog signal (the Embedded branch's `if active`
+    // request included) is handed `active: false` while the timeout is nil,
+    // across windows and re-entry into DEC 2026; with a value, `true` per
+    // open. (Pin 7's pure decision function was deleted with the fork's
+    // reshape of upstream's reconcile/apply: lead 14, 2026-11-14.)
+    @Test func theWatchdogIsToldActiveOnlyWhileAValueIsSet() {
+        let updates = Locked<[Bool]>([])
+        let terminal = ViewTerminal(
+            delegate: Recorder(),
+            synchronizedOutputWatchdogHandler: { active, _ in updates.withLock { $0.append(active) } },
+            scrollHandler: { _ in })
+        terminal.terminalLock.withLock {
+            terminal.synchronizedOutputTimeout = nil
+            terminal.feed(text: Self.open + "x" + Self.open + "\u{1b}[?2026l" + Self.open)
         }
-        window(timeoutIsNil: false)
-        #expect(requests == 2)
-        requests = 0
-        window(timeoutIsNil: true)
-        window(timeoutIsNil: true)
-        #expect(requests == 0)
+        #expect(!updates.withLock { $0 }.isEmpty)
+        #expect(updates.withLock { $0 }.allSatisfy { !$0 }, "\(updates.withLock { $0 })")
+
+        updates.withLock { $0 = [] }
+        terminal.terminalLock.withLock { terminal.synchronizedOutputTimeout = 60 }
+        #expect(updates.withLock { $0 } == [true])
+        terminal.terminalLock.withLock { terminal.feed(text: "\u{1b}[?2026l") }
+        #expect(updates.withLock { $0 } == [true, false])
     }
 
     // Pin 6, the stated consequence (not a rejection): with nil and the mode
     // open, a public expiry (a late host timer or the ordered valve: the same
-    // call) ends the mode and returns true.
+    // call) ends the mode.
     @Test func withNilAPublicExpiryEndsTheModeAsTheOrderedValve() {
         let recorder = Recorder()
         let terminal = Terminal(delegate: recorder)
         terminal.synchronizedOutputTimeout = nil
         terminal.feed(text: Self.open)
-        #expect(terminal.expireSynchronizedOutput() == true)
+        #expect(terminal.synchronizedOutputActive)
+        terminal.expireSynchronizedOutput()
+        #expect(!terminal.synchronizedOutputActive)
         #expect(recorder.changes == [true, false])
     }
 
@@ -185,9 +182,10 @@ final class SynchronizedOutputValveTests {
         owner.synchronizedOutputWatchdog.invalidate()
     }
 
-    // Pin 3: ViewTerminal, nil: expiry returns true once; the view is
-    // released (the next transaction reports the mode inactive) and redraws
-    // (the whole screen is in the update range; the view is told it ended).
+    // Pin 3: ViewTerminal, nil: active before the expiry, not after; a second
+    // call changes nothing; the view is released (the next transaction
+    // reports the mode inactive) and redraws (the whole screen is in the
+    // update range; the view is told it ended).
     @MainActor
     @Test func aViewWithNilIsReleasedAndRedrawsOnExpiry() {
         let recorder = Recorder()
@@ -195,17 +193,21 @@ final class SynchronizedOutputValveTests {
         terminal.terminalLock.withLock { terminal.synchronizedOutputTimeout = nil }
         #expect(owner.feed(text: Self.open) == true)
 
-        let (first, second, range) = terminal.terminalLock.withLock {
+        let (before, after, range, secondRange) = terminal.terminalLock.withLock {
             _ = terminal.getUpdateRange()
             terminal.clearUpdateRange()
-            let first = terminal.expireSynchronizedOutput()
+            let before = terminal.synchronizedOutputActive
+            terminal.expireSynchronizedOutput()
+            let after = terminal.synchronizedOutputActive
             let range = terminal.getUpdateRange()
-            let second = terminal.expireSynchronizedOutput()
-            return (first, second, range)
+            terminal.clearUpdateRange()
+            terminal.expireSynchronizedOutput()
+            return (before, after, range, terminal.getUpdateRange())
         }
 
-        #expect(first == true)
-        #expect(second == false)
+        #expect(before)
+        #expect(!after)
+        #expect(secondRange == nil)
         #expect(range?.startY == 0)
         #expect(range?.endY == 4)
         #expect(recorder.changes == [true, false])
@@ -411,22 +413,40 @@ struct SynchronizedOutputValveSourceTests {
         for (path, text) in try Self.swiftFiles() {
             #expect(!text.contains("override func reconcileSynchronizedOutputWatchdog"), "\(path)")
         }
-        let reconcile = Self.body(of: "func reconcileSynchronizedOutputWatchdog", in: try Self.terminalSource())
-        #expect(reconcile.first?.contains("final func reconcileSynchronizedOutputWatchdog") == true,
-                "\(reconcile.first ?? "not found")")
     }
 
-    /// The Embedded branch requests a host timer only on the decision
-    /// function's result, and it is the only request in the sources.
-    @Test func theEmbeddedTimerRequestIsOnTheDecisionsResult() throws {
+    /// The gate sits BEFORE every receiver, the Embedded branch's timer
+    /// request included: upstream's `applySynchronizedOutputWatchdog` is
+    /// called only from `reconcileSynchronizedOutputWatchdog`, whose added
+    /// block hands it `active: false` while the timeout is nil, before
+    /// upstream's own call; the Embedded request is upstream's, under
+    /// `if active {`, and it is the only request in the sources.
+    @Test func theGateIsBeforeEveryReceiverIncludingTheEmbeddedRequest() throws {
         var requests: [String] = []
+        var applyCalls: [String] = []
         for (path, text) in try Self.swiftFiles() {
-            for line in text.components(separatedBy: "\n")
-            where line.contains("scheduleSynchronizedOutputTimeout(source: self") {
-                requests.append("\(path): \(line)")
+            for line in text.components(separatedBy: "\n") {
+                if line.contains("scheduleSynchronizedOutputTimeout(source: self") { requests.append("\(path): \(line)") }
+                if line.contains("applySynchronizedOutputWatchdog("), !line.contains("func applySynchronizedOutputWatchdog("),
+                   !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
+                    applyCalls.append(line.trimmingCharacters(in: .whitespaces))
+                }
             }
         }
         #expect(requests.count == 1, "\(requests)")
+        #expect(applyCalls == ["applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)",
+                               "applySynchronizedOutputWatchdog("], "\(applyCalls)")
+
+        let reconcile = Self.body(of: "func reconcileSynchronizedOutputWatchdog", in: try Self.terminalSource())
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let gate = reconcile.firstIndex(of: "if synchronizedOutputTimeoutDisabled {")
+        let upstreamCall = reconcile.firstIndex(of: "applySynchronizedOutputWatchdog(")
+        #expect(gate != nil && upstreamCall != nil && gate! < upstreamCall!, "\(reconcile)")
+        if let gate {
+            #expect(reconcile[gate + 1] == "applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)")
+            #expect(reconcile[gate + 2] == "return")
+        }
+
         let apply = Self.body(of: "func applySynchronizedOutputWatchdog(active: Bool, generation: UInt64) {",
                               in: try Self.terminalSource())
         guard let request = apply.firstIndex(where: { $0.contains("scheduleSynchronizedOutputTimeout(source: self") }),
@@ -434,9 +454,7 @@ struct SynchronizedOutputValveSourceTests {
             Issue.record("no request in applySynchronizedOutputWatchdog: \(apply)")
             return
         }
-        let guardLine = apply[request - 1].trimmingCharacters(in: .whitespaces)
-        #expect(guardLine.hasPrefix("if Terminal.synchronizedOutputWatchdogDecision("), "\(guardLine)")
-        #expect(guardLine.hasSuffix("== .requestTimer {"), "\(guardLine)")
+        #expect(apply[request - 1].trimmingCharacters(in: .whitespaces) == "if active {", "\(apply[request - 1])")
     }
 
     /// Lead ruling D: no seam. The terminal's own work item's body is exactly

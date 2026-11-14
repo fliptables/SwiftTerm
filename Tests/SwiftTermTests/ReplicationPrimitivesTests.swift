@@ -161,10 +161,14 @@ final class ReplicationPrimitivesTests {
         let (terminal, _) = makeTerminal()
         terminal.synchronizedOutputTimeout = nil
         terminal.feed(text: "\u{1b}[?2026h")
-        #expect(terminal.expireSynchronizedOutput())
+        // Upstream's valve (Void): active before the call, not after; a second
+        // call changes nothing. It is not the timer, so `fired` stays 0.
+        #expect(terminal.synchronizedOutputActive)
+        terminal.expireSynchronizedOutput()
         #expect(!terminal.synchronizedOutputActive)
-        #expect(!terminal.expireSynchronizedOutput())
-        #expect(terminal.synchronizedOutputWatchdogCounters.fired == 1)
+        terminal.expireSynchronizedOutput()
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(terminal.synchronizedOutputWatchdogCounters.fired == 0)
     }
 
     @Test func settingNilCancelsAnArmedValve() {
