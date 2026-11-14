@@ -109,13 +109,6 @@ final class FrameDriverSignal: Sendable {
         publish([.displayLink])
     }
 
-    /// Test hook: consumes pending events and reports whether a dirty frame
-    /// was requested. Any outstanding delivery then finds nothing to do.
-    @MainActor
-    func takePendingDirtyForTesting() -> Bool {
-        takePendingEvents().contains(.dirty)
-    }
-
     /// Records whether the driver's tick source is running.
     ///
     /// A pty flood marks the frame dirty for every batch, hundreds of

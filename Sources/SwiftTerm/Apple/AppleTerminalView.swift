@@ -4410,11 +4410,6 @@ extension TerminalView {
         /// Each one is a main-queue block that may take the terminal lock, so a
         /// large value relative to `frames` means callback amplification.
         public var mainHops: Int = 0
-        /// Main-queue blocks scheduled by the coalescing event queue (bell,
-        /// buffer, mouse-mode and program-status notifications). At most one is
-        /// outstanding per view (IT-1075). Sync-end and title changes do not
-        /// use the queue: the frame driver applies them at its next tick.
-        public var coalescedMainHops: Int = 0
         /// Frames prepared and drawn on the render loop rather than on the main
         /// thread. Zero when no render loop is running.
         public var renderLoopFrames: Int = 0
@@ -4469,7 +4464,6 @@ extension TerminalView {
     /// A snapshot of the current diagnostics. Safe to read from any thread.
     public var diagnostics: Diagnostics {
         var result = diagnosticsState.withLock { $0 }
-        result.coalescedMainHops = eventQueue.scheduledHops
         let frameCounters = frameDriver?.currentCounters ?? FrameDriverCounters()
         result.ticks = frameCounters.ticks
         result.frames = frameCounters.frames
@@ -4531,7 +4525,6 @@ extension TerminalView {
     public func resetDiagnostics ()
     {
         diagnosticsState.withLock { $0 = Diagnostics() }
-        eventQueue.resetCounters()
         frameDriver?.resetCounters()
 #if canImport(MetalKit)
         renderOwner.resetMetalCounters()

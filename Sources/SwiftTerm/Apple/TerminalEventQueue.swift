@@ -45,28 +45,13 @@ enum TerminalEvent: Int, CaseIterable, Sendable {
     fileprivate var mask: UInt32 { 1 << UInt32(rawValue) }
 }
 
-extension TerminalEvent {
-    /// The name a scheduled hop is counted under in ``ProfilingHopCounter``
-    /// (Scape fork, IT-1075 diagnostics).
-    fileprivate var hopName: StaticString {
-        switch self {
-        case .bufferActivated: return "TerminalEventQueue.post(.bufferActivated)"
-        case .mouseModeChanged: return "TerminalEventQueue.post(.mouseModeChanged)"
-        case .bell: return "TerminalEventQueue.post(.bell)"
-        case .programStatusChanged: return "TerminalEventQueue.post(.programStatusChanged)"
-        }
-    }
-}
-
 /// Thread-safe, allocation-free coalescing queue.
-/// (Scape fork: at most one main-queue block is outstanding.)
 final class TerminalEventQueue: Sendable {
     private struct State {
         var pending: UInt32 = 0
         var drainScheduled = false
         var posts = 0
         var drains = 0
-        var scheduledHops = 0
         var configured = false
         var onDrain: (@MainActor @Sendable (TerminalEvent) -> Void)?
         var canDeliverInline: (@MainActor @Sendable () -> Bool)?
@@ -93,9 +78,6 @@ final class TerminalEventQueue: Sendable {
     /// turned into. The ratio is the whole point of this type.
     var posts: Int { state.withLock { $0.posts } }
     var drains: Int { state.withLock { $0.drains } }
-    /// Main-queue blocks this queue has enqueued. Never more than one is
-    /// outstanding at a time.
-    var scheduledHops: Int { state.withLock { $0.scheduledHops } }
 
     /// Records an event. Safe on any thread, and cheap enough for the parse
     /// path: one lock, one bitwise or, and at most one dispatch per drain
@@ -140,16 +122,12 @@ final class TerminalEventQueue: Sendable {
             state.pending |= event.mask
             if !state.drainScheduled {
                 state.drainScheduled = true
-                state.scheduledHops += 1
                 return true
             }
             return false
         }
 
         guard needsSchedule else { return }
-        if ProfilingStats.enabled {
-            ProfilingHopCounter.shared.record(event.hopName)
-        }
         DispatchQueue.main.async { @MainActor [weak self] in
             self?.drain()
         }
@@ -183,7 +161,6 @@ final class TerminalEventQueue: Sendable {
         state.withLock { state in
             state.posts = 0
             state.drains = 0
-            state.scheduledHops = 0
         }
     }
 

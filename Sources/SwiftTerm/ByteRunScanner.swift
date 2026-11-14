@@ -206,8 +206,9 @@ internal enum ByteRunScanner {
     static func vectorScanC0(in bytes: Span<UInt8>, from start: Int) -> Int {
         bytes.withUnsafeBufferPointer { buffer in
             // IT-2001 D9: an empty span has no base address, and the force
-            // unwrap below would trap (Linux). Nothing to scan: the loop
-            // would return `start` without a load.
+            // unwrap below would trap. Reached only by upstream's direct test
+            // with length 0; production callers never pass fewer than 16
+            // bytes. Compiled only below Swift 6.4. Offered upstream: IT-2023.
             guard buffer.baseAddress != nil else { return start }
             let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start
@@ -229,8 +230,9 @@ internal enum ByteRunScanner {
     static func vectorScanNonASCII(in bytes: Span<UInt8>, from start: Int) -> Int {
         bytes.withUnsafeBufferPointer { buffer in
             // IT-2001 D9: an empty span has no base address, and the force
-            // unwrap below would trap (Linux). Nothing to scan: the loop
-            // would return `start` without a load.
+            // unwrap below would trap. Reached only by upstream's direct test
+            // with length 0; production callers never pass fewer than 16
+            // bytes. Compiled only below Swift 6.4. Offered upstream: IT-2023.
             guard buffer.baseAddress != nil else { return start }
             let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start
@@ -255,8 +257,9 @@ internal enum ByteRunScanner {
         let target = ByteVector(repeating: value)
         return bytes.withUnsafeBufferPointer { buffer in
             // IT-2001 D9: an empty span has no base address, and the force
-            // unwrap below would trap (Linux). Nothing to scan: the loop
-            // would return `start` without a load.
+            // unwrap below would trap. Reached only by upstream's direct test
+            // with length 0; production callers never pass fewer than 16
+            // bytes. Compiled only below Swift 6.4. Offered upstream: IT-2023.
             guard buffer.baseAddress != nil else { return start }
             let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start

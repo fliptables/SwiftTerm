@@ -11071,7 +11071,8 @@ extension Terminal {
     var replicationTerminalIconStack: [String] { get { terminalIconStack } set { terminalIconStack = newValue } }
 
     // Operations
-    /// Drops any partly read sequence before an imported state's pending bytes are fed.
+    /// Puts the parser in ground before an imported state is applied (exports are taken
+    /// only at ground, IT-2001 (B), so nothing partly read is carried).
     func replicationResetParser() { parser.reset(self) }
     func replicationBeginSynchronizedOutput() { beginSynchronizedOutput() }
     func replicationEndSynchronizedOutput() { endSynchronizedOutput() }
