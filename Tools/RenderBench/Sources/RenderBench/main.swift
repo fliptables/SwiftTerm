@@ -297,9 +297,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var vteBenchWorkloadIndex = 0
     private var vteBenchSample: [UInt8] = []
     private var presentationTimedOut = false
+    /// Fork addition (IT-2001): process counters at the start of a `--samples` case.
+    private var caseCountersAtStart: (instructions: UInt64, cycles: UInt64)?
+
+    /// Fork addition (IT-2001): this process's retired instructions and cycles so far.
+    private func processCounters() -> (instructions: UInt64, cycles: UInt64) {
+        var info = rusage_info_v4()
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0)
+            }
+        }
+        return result == 0 ? (info.ri_instructions, info.ri_cycles) : (0, 0)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let contentRect = NSRect(x: 60, y: 200, width: 800, height: 600)
+        // Fork addition (IT-2001): with --no-activate the window sits at the screen's
+        // bottom-left corner; same size, so the same cells are drawn per frame.
+        let contentRect = noActivate
+            ? NSRect(x: 0, y: 0, width: 800, height: 600)
+            : NSRect(x: 60, y: 200, width: 800, height: 600)
         window = NSWindow(contentRect: contentRect,
                           styleMask: [.titled],
                           backing: .buffered,
@@ -442,6 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         terminalView.resetDiagnostics()
+        caseCountersAtStart = sampleLimit == nil ? nil : processCounters()
         frameCount = 0
         byteCount = 0
         lastReportedSecond = 0
@@ -474,6 +492,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Waits for the final dirty frame before it reads diagnostics and exits.
     private func finishVTEBenchMeasurement(elapsed: Double) {
+        if let start = caseCountersAtStart {
+            // Fork addition (IT-2001): the whole process's instructions and cycles over
+            // this case's measured feeds (every thread, the render loop included).
+            let end = processCounters()
+            print("VTEBENCH_COUNTERS name=\(selectedVTEBenchWorkloads[vteBenchWorkloadIndex].name) " +
+                  "samples=\(frameCount) instructions=\(end.instructions &- start.instructions) " +
+                  "cycles=\(end.cycles &- start.cycles)")
+            caseCountersAtStart = nil
+        }
         let measuredDiagnostics = terminalView.diagnostics
         let presentation = presentationCounter.value
         terminalView.requestRedraw()
