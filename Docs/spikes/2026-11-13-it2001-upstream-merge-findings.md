@@ -362,3 +362,94 @@ rests on were then re-checked by hand with `git grep`: `respondsToQueries` is re
 `kittyClipboardSendPasteEvent` has one call site; every `paste(` caller is the list above (the
 WebAssembly export was missing from the draft); and the protocol has 39 requirements (the draft
 said 41).
+
+## The fork only adds (lead 14, 00:46Z): sweep, pin, allow-list (commits `12a9e35`..., 2026-11-13)
+
+The rule: the fork never changes or removes a line of a file that exists upstream; what Scape needs
+is added beside it. Before the sweep, 90 upstream lines in 12 files under `Sources/SwiftTerm` were
+changed or removed. After it, 23 are, and each is on a closed allow-list the lead ruled on.
+
+**The pin.** `UpstreamOnlyAddsTests.everyUpstreamLineIsAtHead` reads
+`Tests/UpstreamManifest/d4f52faaa.lines` (one FNV-1a 32 hash per line of every upstream file under
+`Sources/SwiftTerm`: 153 files, 79,588 lines), written by `Tools/upstream-manifest.py` (`write`, or
+`check` against git). Per file, upstream's hash sequence less the allow-list must be a
+subsequence of HEAD's lines. A missing file fails; a stale entry (hash no longer upstream's) or an
+unneeded one (HEAD keeps the line) fails; the manifest header's SHA-256 must be the generator's.
+No git, no network, no Apple-only API. A failure prints `file:upstream_line hash`. Red at `12a9e35`
+(90 lines, 12 files: the sweep's list line for line); green at the allow-list commit. The sweep
+script (`sweep.py`, builder scratch) agrees independently: 23 lines.
+
+Not covered by the pin: lines the fork ADDS inside upstream's hot functions. The inventory by path
+heat and the whole-fork A/B stay the guard for those.
+
+**Reverted to upstream's text, need met by an addition (54 lines + 12 whitespace/comment):**
+
+| Lines | Now |
+|---|---|
+| CellStorage :317 :358 :380-382 :384 :431 :606 | upstream's fixed attribute table; 9500a26's lazy table and its tests deleted (+1.44% instructions per cell read for ~29 KB per terminal; nothing depends on it) |
+| ByteRunScanner :208 :227 :249 (D9) | upstream's force unwrap; `guard buffer.baseAddress != nil else { return start }` added before it |
+| MacLocalTerminalView :341-342 (D6) | upstream's guard; `guard windowSizeIsSendable(size) else { return }` added before it |
+| TerminalEventQueue :48 :85 | upstream's `post(_:)`; the profiling hop is counted under the event's name |
+| Terminal D8 :1038 :1042-1044 :3111 :3561 :7324-7325 :7932 :7940 :7945 :7951 :7974, Kitty :988 :1598 | upstream's `tdel?.send` sites; replies get an added `guard respondsToQueries else` line |
+| Terminal D7 :9132 :9135 :9142 :9146-9151 :9154 :9192 | see "D7 after the sweep" |
+| SearchEngine (5), SearchService (7), Apple :1567 :1756, Mac :289 :478 :502 :2786 :2792 | upstream's access levels; Scape's uses get forwarders in `Apple/TerminalViewScapeAccess.swift` |
+| Mac :3628 :3634-3635 | upstream's alternate-screen route; the fork's always-cursor-keys route is an added line behind `alternateScreenWheelSendsCursorKeys` (default `true`: no change on screen) |
+| Pty :136, Terminal :105, Mac :1877 :2914 | upstream's whitespace |
+
+**THE ALLOW-LIST (23 lines; the lead read each).** None is per byte or per cell; the only per-frame
+entries are D2's two Apple lines.
+
+| File:upstream line | Reason |
+|---|---|
+| Terminal :3540 | D8: the semantic-prompt click is user input; it leaves the gated `sendResponse` family for `sendUserInputBytes` |
+| Terminal :7936 | D8: `sendResponse(_ bytes:)` is one line, so no guard line fits; it calls the gated `sendQueryResponse` |
+| Terminal :9370-9371 | D8: `sendEvent`'s mouse packet is user input (to `sendUserInputBytes`) |
+| Terminal :9388-9390 | D8: `sendMousePacket`'s packet is user input (to `sendUserInputBytes`) |
+| Apple :2602 :2604 | D2: `applyPendingViewUpdates`' one existing lock also takes the pending title (per frame) |
+| Mac :3948-3952, iOS :3833-3837 | D2: `setTerminalTitle` records the latest title for the next frame instead of a main-queue hop per title |
+| Mac :3606 | `scrollWheel` is `open`: Scape overrides it; no addition can make a member overridable |
+| Mac :2908-2910 | autoscroll: active check, hit test and `dragExtend` under one terminal lock; upstream's unlocked `dragExtend` races the IO thread |
+
+Every reason ends "offered upstream: IT-2023" (D8, D2, wheel, autoscroll); nothing was posted to
+the upstream project. D2's per-frame cost, quoted from `applyPendingViewUpdates`: the title is a
+`String?` taken inside the same `crossThreadState.withLock` upstream already takes once per frame;
+with no title pending it is `nil`: no lock and no allocation are added. Upstream's
+`setTerminalTitle` does hop: `onMain { … }`, and upstream's `onMain` (AppleTerminalView:1951-1966)
+ends `DispatchQueue.main.async`. IT-1075's measurement is re-done for D2 as the plan requires, and
+RenderBench covers it.
+
+**D7 after the sweep (reverses the plan's pin 7 and the 17:55Z condition b).** Upstream's
+`reconcileSynchronizedOutputWatchdog` and `applySynchronizedOutputWatchdog` are back byte for byte.
+The gate is ONE block added in reconcile, before upstream's call:
+`if synchronizedOutputTimeoutDisabled { applySynchronizedOutputWatchdog(active: false, …); return }`.
+Reconcile is apply's only caller, so the gate sits before every receiver, the Embedded branch's
+request included (upstream's `if active { tdel?.scheduleSynchronizedOutputTimeout(…) }`). The pure
+decision function, the switch and `final` are deleted. Pin 7 (the decision table) is gone; pin 6 is
+a behaviour test plus the source pin on the gate's position; pins 1 and 3 now read "active before
+the call, not after; a second call changes nothing".
+
+`expireSynchronizedOutput()` is upstream's (`Void`) again; the fork adds nothing. The host reads
+`synchronizedOutputActive` just before calling it, both under the terminal lock. #1289 changes one
+guard: HostSession.swift:333 `guard !ended, terminal.expireSynchronizedOutput() else { return }`.
+
+- **Does upstream's expiry cancel the terminal's own timer?** Yes. `endSynchronizedOutput()` sets
+  the watchdog dirty and, at `parseDepth == 0`, reconciles; that reaches upstream's
+  `guard active else { synchronizedOutputTimeoutItem.cancel(); … }`. A callback already past the
+  cancel is stopped by `synchronizedOutputWatchdogFired`'s active and generation checks. Pin:
+  `SynchronizedOutputValveTests.aLateTimerAfterAHostExpiryChangesNothing` (red with the generation
+  check planted out: 3 issues).
+- **`fired == 1` became `fired == 0`** in `ReplicationPrimitivesTests.expiringTheValve…`: upstream's
+  valve is not the timer. The test still asserts the outcome beside the counter (active before,
+  not after, and still not after a second call). The test with a view (pin 3) asserts that the view
+  is released and redraws. No code outside tests reads `fired`: in the fork it is only written
+  (Terminal.swift:9361, SynchronizedOutputWatchdog.swift:118); `git grep` for
+  `WatchdogCounters|watchdogCounters|\.fired\b` finds nothing in Scape `origin/main` or in #1289
+  (`46faf0eff`).
+
+**D8's source pin, reshaped.** `ReplicaSinkSourceTests` now checks that every `tdel?.send(` in the
+shared sources is either preceded in its function by `guard [terminal.]respondsToQueries else`, or
+in a closed list of user-input functions with reasons (`sendUserInputBytes`, `sendUserInput`,
+`sendRepeatedSemanticSequence`, `sendFocusReport`, `paste`). It also checks that the DECSET 1004
+`sendFocusReport()` call has the guard on the line before. So `respondsToQueries` is now read at
+those guard lines and in `sendQueryResponse`, not at one place only: this supersedes "read only at
+:959" in the delegate table above.
