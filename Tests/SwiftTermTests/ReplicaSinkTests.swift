@@ -155,41 +155,79 @@ final class ReplicaSinkTests {
     }
 }
 
-/// P2 source pins (C5; lead ruling C).
+/// P2 source pins (C5; lead ruling C), in the "fork only adds" shape: the
+/// reply gate is a `guard respondsToQueries else` line ADDED before upstream's
+/// own `tdel?.send` lines, so every write toward the child is either a gated
+/// reply or a user-input site from a closed list.
 struct ReplicaSinkSourceTests {
-    static let sinks = ["sendQueryResponse", "sendUserInputBytes"]
+    /// The functions that write user input toward the child, ungated. Closed:
+    /// a new ungated `tdel?.send` site fails until it is listed here with its
+    /// reason (and a reply site is never listed: it gets the guard).
+    static let userInputSites: [String: String] = [
+        "sendUserInputBytes": "the fork's user-input transport for mouse packets and the semantic-prompt click",
+        "sendUserInput": "keyboard input, registered first (upstream's site)",
+        "sendRepeatedSemanticSequence": "a semantic-prompt click's cursor keys (upstream's site)",
+        "sendFocusReport": "a real focus change; the DECSET 1004 reply guards before calling it (see below)",
+        "paste": "a Kitty clipboard paste, registered first (upstream's site)",
+    ]
 
-    /// Each function that matches `tdel?.send(` in the shared sources
-    /// (outside Apple/, Mac/, iOS/), any spacing, qualified or not.
-    static func sendSites() throws -> [(file: String, line: Int, function: String)] {
+    /// Each `tdel?.send(` in the shared sources (outside Apple/, Mac/, iOS/),
+    /// any spacing, qualified or not, with its function and whether a
+    /// `guard [terminal.]respondsToQueries else` line precedes it in that function.
+    static func sendSites() throws -> [(file: String, line: Int, function: String, gated: Bool)] {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/SwiftTerm")
         let pattern = try Regex(#"tdel\s*\?\s*\.\s*send\s*\("#)
         let funcPattern = try Regex(#"\bfunc\s+([A-Za-z_][A-Za-z0-9_]*)"#)
-        var result: [(String, Int, String)] = []
+        let guardPattern = try Regex(#"^\s*guard\s+(terminal\.)?respondsToQueries\s+else\b"#)
+        var result: [(String, Int, String, Bool)] = []
         let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!
         for case let url as URL in enumerator where url.pathExtension == "swift" {
             let relative = url.path.replacingOccurrences(of: root.path + "/", with: "")
             if relative.hasPrefix("Apple/") || relative.hasPrefix("Mac/") || relative.hasPrefix("iOS/") { continue }
             var function = "?"
+            var gated = false
             for (index, line) in try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n").enumerated() {
-                if let match = line.firstMatch(of: funcPattern) { function = String(match.output[1].substring ?? "?") }
-                if line.contains(pattern) { result.append((relative, index + 1, function)) }
+                if let match = line.firstMatch(of: funcPattern) {
+                    function = String(match.output[1].substring ?? "?")
+                    gated = false
+                }
+                if line.contains(guardPattern) { gated = true }
+                if line.contains(pattern) { result.append((relative, index + 1, function, gated)) }
             }
         }
         return result
     }
 
-    /// Closed and empty allow-list: a write toward the child outside the two
-    /// sinks fails. To add one, add a line here with its reason.
-    static let allowList: [String: String] = [:]
-
-    @Test func onlyTheTwoSinksWriteTowardTheChild() throws {
+    @Test func everyWriteTowardTheChildIsAGatedReplyOrListedUserInput() throws {
         let sites = try Self.sendSites()
-        let outside = sites.filter { !Self.sinks.contains($0.function) && Self.allowList[$0.function] == nil }
-        #expect(outside.isEmpty, "\(outside.map { "\($0.file):\($0.line) in \($0.function)" })")
-        #expect(Set(sites.map(\.function)) == Set(Self.sinks), "\(sites.map { "\($0.file):\($0.line) \($0.function)" })")
+        let ungated = sites.filter { !$0.gated && Self.userInputSites[$0.function] == nil }
+        #expect(ungated.isEmpty, "ungated, not listed as user input: \(ungated.map { "\($0.file):\($0.line) in \($0.function)" })")
+        let gatedUserInput = sites.filter { $0.gated && Self.userInputSites[$0.function] != nil }
+        #expect(gatedUserInput.isEmpty, "a user-input site is gated: \(gatedUserInput.map { "\($0.file):\($0.line) in \($0.function)" })")
+        // No stale entries: each listed function still writes toward the child.
+        #expect(Set(sites.filter { !$0.gated }.map(\.function)) == Set(Self.userInputSites.keys),
+                "\(sites.map { "\($0.file):\($0.line) \($0.function) gated=\($0.gated)" })")
+        // The reply family: upstream's five multi-line `sendResponse` bodies,
+        // the fork's `sendQueryResponse`, and Kitty's response `send(_:to:)`.
+        #expect(sites.filter { $0.gated }.map(\.function).sorted()
+                == ["send", "sendQueryResponse", "sendResponse", "sendResponse", "sendResponse", "sendResponse", "sendResponse"],
+                "\(sites.filter { $0.gated }.map { "\($0.file):\($0.line) \($0.function)" })")
+    }
+
+    /// `sendFocusReport()` is user input, so its one reply caller (DECSET
+    /// 1004's report of the current state) carries the guard on the line
+    /// before; its other caller is `setTerminalFocus`.
+    @Test func theFocusReplyIsGatedAtItsCallSite() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/SwiftTerm/Terminal.swift")
+        let lines = try String(contentsOf: url, encoding: .utf8).components(separatedBy: "\n")
+        let calls = lines.indices.filter { lines[$0].trimmingCharacters(in: .whitespaces) == "sendFocusReport()" }
+        #expect(calls.count == 2, "\(calls.map { $0 + 1 })")
+        let guarded = calls.filter { lines[$0 - 1].trimmingCharacters(in: .whitespaces) == "guard respondsToQueries else { break }" }
+        #expect(guarded.count == 1, "\(calls.map { "\($0 + 1): \(lines[$0 - 1])" })")
     }
 
     /// Ruling C(2): `kittyClipboardSendPasteEvent` is user input only if no

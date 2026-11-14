@@ -44,6 +44,21 @@ final class UpstreamOnlyAddsTests {
     /// entry whose hash no longer matches upstream's line, or whose line the
     /// fork no longer needs to change, fails.
     static let allowList: [Allowed] = [
+        // D8: a replica answers no query; user input still goes through.
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 3540, hash: "b1a7013e",
+                reason: "D8: the semantic-prompt click is user input, so it must leave the gated sendResponse family for sendUserInputBytes; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 7936, hash: "05801985",
+                reason: "D8: sendResponse(_ bytes:) is a one-line body, so no guard line can be added before its send; it calls the gated sendQueryResponse; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9370, hash: "da96931e",
+                reason: "D8: sendEvent's mouse packet is user input, so it must leave the gated sendResponse(_ bytes:) for sendUserInputBytes; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9371, hash: "e67cdf79",
+                reason: "D8: second line of the same sendEvent call (mouse packet = user input); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9388, hash: "f6bd462a",
+                reason: "D8: sendMousePacket's packet is user input, so it must leave the gated sendResponse(_ bytes:) for sendUserInputBytes; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9389, hash: "bae653ab",
+                reason: "D8: second line of the same sendMousePacket call (mouse packet = user input); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9390, hash: "6d031297",
+                reason: "D8: third line of the same sendMousePacket call (mouse packet = user input); offered upstream: IT-2023"),
     ]
 
     // MARK: the rule

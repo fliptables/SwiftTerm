@@ -923,21 +923,20 @@ open class Terminal {
         set { cold.respondsToQueries = newValue }
     }
 
-    /// The reply sink (IT-2001 P2): every byte this terminal generates from
-    /// parsed input goes through here, and only the terminal that responds
-    /// sends it. With ``sendUserInputBytes(_:)`` it is one of the two places
-    /// that write bytes toward the child.
+    /// A gated reply (IT-2001 D8): only the terminal that responds sends it.
+    /// Every byte this terminal generates from parsed input is gated: here, or
+    /// at upstream's own send sites behind an added
+    /// `guard respondsToQueries else` line (`ReplicaSinkSourceTests`).
     @inline(__always)
     func sendQueryResponse(_ data: ArraySlice<UInt8>) {
         guard respondsToQueries else { return }
         tdel?.send(source: self, data: data)
     }
 
-    /// The user-input sink (IT-2001 P2): bytes the user caused (keyboard,
-    /// paste, mouse packets, semantic-prompt clicks, a focus change). Not
-    /// gated: a replica sends them. Transport only: input registration
-    /// (``registerUserInput(_:)``) is a separate call at the sites that
-    /// register.
+    /// User input (IT-2001 D8) from sites that must leave upstream's gated
+    /// `sendResponse` family: mouse packets and the semantic-prompt click.
+    /// Not gated: a replica sends them. Upstream's other user-input sites
+    /// (keyboard, paste, focus change) call `tdel?.send` directly.
     @inline(__always)
     func sendUserInputBytes(_ data: ArraySlice<UInt8>) {
         tdel?.send(source: self, data: data)
@@ -1150,13 +1149,15 @@ open class Terminal {
     public func setTerminalFocus(_ focused: Bool) {
         reportedFocusState = focused
         if sendFocus {
-            // A real focus change: user input.
-            sendUserInputBytes(focusReportBytes()[...])
+            sendFocusReport()
         }
     }
 
-    func focusReportBytes() -> [UInt8] {
-        cc.CSI + [reportedFocusState ? 0x49 : 0x4f]
+    /// IT-2001 D8: user input (not gated) when a real focus change sends it;
+    /// the DECSET 1004 reply site guards on `respondsToQueries` before calling.
+    func sendFocusReport() {
+        let data: [UInt8] = cc.CSI + [reportedFocusState ? 0x49 : 0x4f]
+        tdel?.send(source: self, data: data[0...])
     }
 
     /// Records the terminal's effective visibility and reports a change to subscribed applications.
@@ -3223,7 +3224,7 @@ open class Terminal {
     /// paste, and programmatic input.
     public func sendUserInput(_ data: ArraySlice<UInt8>) {
         registerUserInput(data)
-        sendUserInputBytes(data)
+        tdel?.send(source: self, data: data)
     }
 
     /// Updates semantic interaction state for input delivered by a view.
@@ -3675,7 +3676,7 @@ open class Terminal {
     }
 
     private func sendRepeatedSemanticSequence(_ data: [UInt8]) {
-        sendUserInputBytes(data[...])
+        tdel?.send(source: self, data: data[...])
     }
 
     // MARK: OSC 133 stream handling (R2, R4)
@@ -7444,10 +7445,11 @@ open class Terminal {
                 sendFocus = true
                 // Report the current state right away (xterm behavior), so
                 // the application does not assume it is unfocused until the
-                // first real focus change. This report answers parsed
-                // input, so it is a reply; a later focus change
-                // (`setTerminalFocus`) is user input.
-                sendQueryResponse(focusReportBytes()[...])
+                // first real focus change.
+                // IT-2001 D8: this report answers parsed input, so it is a
+                // reply; a later focus change (`setTerminalFocus`) is user input.
+                guard respondsToQueries else { break }
+                sendFocusReport()
             case 1007: // alternate scroll mode (xterm's alternateScroll resource)
                 alternateScrollMode = true
             case 1005:
@@ -8054,27 +8056,31 @@ open class Terminal {
      */
     public func sendResponse (text: String)
     {
-        sendQueryResponse(([UInt8] (text.utf8))[...])
+        guard respondsToQueries else { return } // IT-2001 D8: replies are gated
+        tdel?.send (source: self, data: ([UInt8] (text.utf8))[...])
     }
 
     public func sendResponse(_ text: String) { sendResponse(text: text) }
-    // IT-2001 P2: every overload is the reply sink. A replica answers nothing.
+    // IT-2001 D8 (allow-listed line): every overload is a reply, gated; a replica answers nothing.
     public func sendResponse(_ bytes: [UInt8]) { sendQueryResponse(bytes[...]) }
     public func sendResponse(_ prefix: [UInt8], _ text: String) {
+        guard respondsToQueries else { return } // IT-2001 D8: replies are gated
         var response = prefix
         response.append(contentsOf: text.utf8)
-        sendQueryResponse(response[...])
+        tdel?.send(source: self, data: response[...])
     }
     public func sendResponse(_ prefix: [UInt8], _ bytes: [UInt8]) {
+        guard respondsToQueries else { return } // IT-2001 D8: replies are gated
         var response = prefix
         response.append(contentsOf: bytes)
-        sendQueryResponse(response[...])
+        tdel?.send(source: self, data: response[...])
     }
     public func sendResponse(_ prefix: [UInt8], _ text: String, _ suffix: [UInt8]) {
+        guard respondsToQueries else { return } // IT-2001 D8: replies are gated
         var response = prefix
         response.append(contentsOf: text.utf8)
         response.append(contentsOf: suffix)
-        sendQueryResponse(response[...])
+        tdel?.send(source: self, data: response[...])
     }
     
     /**
@@ -8084,12 +8090,7 @@ open class Terminal {
 #if !SWIFTTERM_EMBEDDED
     public func sendResponse (_ items: Any ...)
     {
-        sendQueryResponse(responseBytes(items)[...])
-    }
-
-
-    private func responseBytes (_ items: [Any]) -> [UInt8]
-    {
+        guard respondsToQueries else { return } // IT-2001 D8: replies are gated
         var buffer: [UInt8] = []
         
         for item in items {
@@ -8103,7 +8104,7 @@ open class Terminal {
                 log ("Do not know how to handle type \(item)")
             }
         }
-        return buffer
+        tdel?.send (source: self, data: buffer[...])
     }
 #endif
     
