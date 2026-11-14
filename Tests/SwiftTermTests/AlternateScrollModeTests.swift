@@ -148,6 +148,31 @@ final class AlternateScrollModeTests: TerminalDelegate {
                 "mode reset: the fork still moves the cursor (unconditional alternate-scroll)")
     }
 
+    /// With `alternateScreenWheelSendsCursorKeys = false` the route is
+    /// upstream's: the wheel moves the cursor while DECSET 1007 is set and is
+    /// dropped once it is reset.
+    @MainActor @Test func withTheFlagOffTheAlternateScreenWheelFollowsTheMode() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 320, height: 160))
+        #expect(view.alternateScreenWheelSendsCursorKeys)
+        view.alternateScreenWheelSendsCursorKeys = false
+        let delegate = WheelCapturingDelegate()
+        view.terminalDelegate = delegate
+        view.terminal.feed(text: "\u{1b}[?1049h")
+
+        guard let wheel = Self.makeWheelEvent(lines: -1) else {
+            Issue.record("could not synthesize a scroll wheel event")
+            return
+        }
+
+        view.scrollWheel(with: wheel)
+        #expect(delegate.sent == [Array(EscapeSequences.moveDownNormal)])
+
+        view.terminal.feed(text: "\u{1b}[?1007l")
+        delegate.sent = []
+        view.scrollWheel(with: wheel)
+        #expect(delegate.sent.isEmpty, "mode reset: upstream drops the event")
+    }
+
     /// Scape fork companion to the unconditional cursor-keys route: sub-line
     /// trackpad deltas BANK on the alternate screen (there is no 1007-reset
     /// suppressed state to discard them in), so gentle scrolling accumulates

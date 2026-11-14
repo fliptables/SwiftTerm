@@ -111,6 +111,16 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     /// (Scape fork: scape-selection-api.)
     public var resizeSuspended = false
 
+    /// On the alternate screen, the wheel sends cursor keys even when DECSET
+    /// 1007 (Alternate Scroll Mode) is off. Upstream drops the event then
+    /// (protocol-correct); Scape has always forwarded wheel → Up/Down for
+    /// alternate-screen pagers and TUIs that never enable 1007 (less, man, vim
+    /// without mouse opt-ins): xterm's alternateScroll resource, permanently
+    /// on. The WheelReportBudget still bounds the keystroke flood. Default
+    /// `true` keeps Scape's behaviour; `false` is upstream's.
+    /// (Scape fork, IT-2001: an addition beside upstream's route.)
+    public var alternateScreenWheelSendsCursorKeys = true
+
 #if canImport(MetalKit)
     // Default to throttling Metal redraws during live-resize; set SWIFTTERM_METAL_LIVE_RESIZE_THROTTLE=0 to disable.
     private static let metalLiveResizeThrottleEnabled: Bool = {
@@ -3644,23 +3654,20 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
             if allowMouseReporting && terminal.mouseMode != .off {
                 return .mouse
             }
-            if terminal.isDisplayBufferAlternate {
-                // Scape fork: route to cursor keys on the alternate screen even
-                // when DECSET 1007 is off. Upstream drops the event when the
-                // mode is reset (protocol-correct), but the fork has always
-                // forwarded wheel → Up/Down for alt-screen pagers/TUIs that
-                // never enable 1007 (less, man, vim without mouse opt-ins) —
-                // xterm's alternateScroll resource, permanently on. The
-                // WheelReportBudget still bounds the keystroke flood.
+            // Scape fork: see `alternateScreenWheelSendsCursorKeys`.
+            if terminal.isDisplayBufferAlternate && alternateScreenWheelSendsCursorKeys {
                 return .cursorKeys
+            }
+            if terminal.isDisplayBufferAlternate {
+                return terminal.alternateScrollMode ? .cursorKeys : .none
             }
             return .localScrollback
         }
 
         // A suppressed event must not bank a partial trackpad row and hand it to a later route.
-        // With the Scape fork's unconditional alternate-screen cursor-keys route above, the
-        // only suppression left is a local-handling modifier held over the alternate buffer,
-        // which has no local scrollback.
+        // This includes Alternate Scroll Mode being reset and a local-handling modifier being
+        // held over the alternate buffer, which has no local scrollback.
+        // (Scape fork: with `alternateScreenWheelSendsCursorKeys`, only the modifier case.)
         if scrollRoute == .none {
             scrollAccumulator.reset()
             return
