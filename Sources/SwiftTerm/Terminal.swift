@@ -9258,14 +9258,23 @@ open class Terminal {
     func reconcileSynchronizedOutputWatchdog () {
         guard synchronizedOutputWatchdogDirty else { return }
         synchronizedOutputWatchdogDirty = false
-        // IT-2001 D7: the gate, before upstream's call below.
+        // IT-2001 D7: the gate, after upstream's dirty exit and before upstream's call below;
+        // its body is out of line so this function stays upstream's size (inlined per feed).
         if synchronizedOutputTimeoutDisabled {
-            applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)
+            reconcileDisabledSynchronizedOutputWatchdog()
             return
         }
         applySynchronizedOutputWatchdog(
             active: synchronizedOutputActive,
             generation: synchronizedOutputGeneration)
+    }
+
+    /// The D7 gate's body (IT-2001): tells every receiver "not active" while the timeout is
+    /// `nil`. Never inlined, so the per-feed `reconcileSynchronizedOutputWatchdog()` keeps
+    /// upstream's size and is inlined into parse as upstream's is.
+    @inline(never)
+    private func reconcileDisabledSynchronizedOutputWatchdog() {
+        applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)
     }
 
     func applySynchronizedOutputWatchdog(active: Bool, generation: UInt64) {
