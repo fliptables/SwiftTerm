@@ -177,6 +177,9 @@ final class ReplicationFormatV2Tests {
     /// Edits one field of a valid snapshot's image, re-encodes it, and expects decode to refuse it.
     private static func refuses(_ what: String, _ edit: (inout TerminalStateSnapshot) -> Void) throws {
         var snapshot = try validSnapshot()
+        // The unedited image decodes, so a refusal below is the edit's.
+        let unedited = snapshot.encoded()
+        #expect(throws: Never.self, "\(what): the unedited snapshot") { _ = try TerminalStateSnapshot(encoded: unedited) }
         edit(&snapshot)
         let bytes = snapshot.encoded()
         #expect(throws: TerminalStateSnapshotError.self, "\(what) decoded") { try TerminalStateSnapshot(encoded: bytes) }
@@ -359,6 +362,96 @@ final class ReplicationFormatV2Tests {
     }
 
     /// The relaxed view (yBase, yDisp up to lines.count, past lines.count - rows) imports and survives.
+    /// Upstream resizes the alternate buffer on every resize (Terminal.resizeBuffers); only the
+    /// normal buffer is deferred, and only while the alternate screen is active. A hidden grid is
+    /// FILLED at its next activation (fillViewportRows: rows lines of cols cells), and an active
+    /// one fills its missing rows lazily, so the cap counts rows x cols as well as the lines held.
+    /// Decode only; never imported.
+    @Test func decodeRefusesAGridThatFillsPastTheCellCap() throws {
+        try Self.refuses("a hidden alt grid past the cap, no lines") { snapshot in
+            let side = 65535
+            snapshot.modes.cols = side; snapshot.modes.rows = side
+            for alternate in [false, true] {
+                var buffer = alternate ? snapshot.alt : snapshot.normal
+                buffer.cols = side; buffer.rows = side
+                buffer.lineCapacity = side + (buffer.scrollback ?? 0)
+                buffer.scrollBottom = side - 1; buffer.marginRight = side - 1
+                buffer.tabStops = Array(repeating: false, count: side)
+                if alternate {
+                    buffer.lines = []
+                } else {
+                    // The normal buffer holds its grid in pending history, no lines decoded wide.
+                    buffer.lines = [buffer.lines[buffer.lines.count - 1]]
+                    buffer.lines[0].cols = side; buffer.lines[0].cells = []
+                    buffer.pendingHistoryLines = side - 1
+                    buffer.yBase = 0; buffer.yDisp = 0; buffer.y = 0; buffer.savedY = 0
+                    buffer.semanticPromptStartRow = nil
+                }
+                if alternate { snapshot.alt = buffer } else { snapshot.normal = buffer }
+            }
+        }
+        try Self.refuses("an active grid filled from pending history past the cap") { snapshot in
+            let cols = 65535, rows = 2000
+            snapshot.modes.cols = cols; snapshot.modes.rows = rows
+            var buffer = snapshot.normal
+            buffer.cols = cols; buffer.rows = rows
+            buffer.lineCapacity = rows + (buffer.scrollback ?? 0)
+            buffer.scrollBottom = rows - 1; buffer.marginRight = cols - 1
+            buffer.tabStops = Array(repeating: false, count: cols)
+            buffer.lines = [buffer.lines[buffer.lines.count - 1]]
+            buffer.lines[0].cols = cols; buffer.lines[0].cells = []
+            buffer.pendingHistoryLines = rows - 1
+            buffer.yBase = 0; buffer.yDisp = 0; buffer.y = 0; buffer.savedY = 0
+            buffer.semanticPromptStartRow = nil
+            snapshot.normal = buffer
+            snapshot.alt.cols = cols; snapshot.alt.rows = rows
+            snapshot.alt.tabStops = Array(repeating: false, count: cols)
+            snapshot.alt.scrollBottom = rows - 1; snapshot.alt.marginRight = cols - 1
+            snapshot.alt.lineCapacity = rows
+        }
+    }
+
+    /// The alternate buffer always has the modes' grid; only the normal buffer, hidden under
+    /// the alternate screen, may keep an older one. Only the inactive alternate buffer may be empty.
+    @Test func decodeRefusesAHiddenGridUpstreamNeverLeaves() throws {
+        try Self.refuses("hidden alt cols != modes cols") { snapshot in
+            snapshot.alt.cols = 31
+            snapshot.alt.tabStops = Array(repeating: false, count: 31)
+            snapshot.alt.marginRight = 30
+        }
+        let owner = Self.make()
+        owner.feed(text: (0..<20).map { "line \($0)\r\n" }.joined() + "\u{1b}[?1049halt")
+        let onAlt = try #require(owner.exportState())
+        #expect(throws: Never.self) { _ = try TerminalStateSnapshot(encoded: onAlt.encoded()) }
+        var emptyNormal = onAlt
+        emptyNormal.normal.lines = []; emptyNormal.normal.yBase = 0; emptyNormal.normal.yDisp = 0
+        emptyNormal.normal.semanticPromptStartRow = nil
+        let bytes = emptyNormal.encoded()
+        #expect(throws: TerminalStateSnapshotError.self, "a hidden normal buffer with no lines decoded") {
+            try TerminalStateSnapshot(encoded: bytes)
+        }
+    }
+
+    /// The relaxed "lines + pending history >= rows", driven: the honest screen part of an
+    /// alternate buffer grown by a resize (8 lines for 14 rows), imported before any chunk, and
+    /// the extreme, one line with rows - 1 still to come.
+    @Test func aScreenPartWithHistoryStillToComeSurvives() throws {
+        let owner = Self.make()
+        let history = (0..<60).map { "line \($0)\r\n" }.joined()
+        owner.feed(text: history + "\u{1b}[?1049h" + history + "\u{1b}[4;9H\u{1b}7")
+        owner.resize(cols: 45, rows: 14)
+        owner.feed(text: "z")
+        let screen = try #require(owner.exportForStreaming()).screen
+        #expect(screen.alt.lines.count < screen.alt.rows, "\(Self.summary(screen))")
+        try Self.survives(screen)
+        var extreme = try Self.validSnapshot()
+        extreme.normal.pendingHistoryLines = extreme.normal.rows - 1
+        extreme.normal.lines = [extreme.normal.lines[extreme.normal.lines.count - 1]]
+        extreme.normal.yBase = 0; extreme.normal.yDisp = 0; extreme.normal.y = 0
+        extreme.normal.semanticPromptStartRow = nil
+        try Self.survives(extreme)
+    }
+
     @Test func aViewAtTheLinesHeldSurvives() throws {
         var snapshot = try Self.validSnapshot()
         snapshot.normal.yBase = snapshot.normal.lines.count
