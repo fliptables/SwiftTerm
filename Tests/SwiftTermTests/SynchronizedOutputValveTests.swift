@@ -448,10 +448,16 @@ struct SynchronizedOutputValveSourceTests {
 
     /// The gate sits BEFORE every receiver, the Embedded branch's timer
     /// request included: upstream's `applySynchronizedOutputWatchdog` is
-    /// called only from `reconcileSynchronizedOutputWatchdog`, whose added
-    /// block hands it `active: false` while the timeout is nil, before
-    /// upstream's own call; the Embedded request is upstream's, under
+    /// called only from `reconcileSynchronizedOutputWatchdog` and from the
+    /// gate's one cold helper, which hands it `active: false` while the
+    /// timeout is nil; the Embedded request is upstream's, under
     /// `if active {`, and it is the only request in the sources.
+    ///
+    /// The gate's PLACE (IT-2001, builder #7): after upstream's "nothing is
+    /// dirty" exit, so a feed with nothing dirty runs upstream's instructions
+    /// and no others, and its body is one call to an `@inline(never)` helper,
+    /// so reconcile stays small enough to inline into parse's `defer` as
+    /// upstream's does (an inline body measured +7 instructions per feed call).
     @Test func theGateIsBeforeEveryReceiverIncludingTheEmbeddedRequest() throws {
         var requests: [String] = []
         var applyCalls: [String] = []
@@ -465,18 +471,40 @@ struct SynchronizedOutputValveSourceTests {
             }
         }
         #expect(requests.count == 1, "\(requests)")
-        #expect(applyCalls == ["applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)",
-                               "applySynchronizedOutputWatchdog("], "\(applyCalls)")
+        #expect(applyCalls.sorted() == ["applySynchronizedOutputWatchdog(",
+                                        "applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)"],
+                "\(applyCalls)")
 
-        let reconcile = Self.body(of: "func reconcileSynchronizedOutputWatchdog", in: try Self.terminalSource())
+        let source = try Self.terminalSource()
+        let reconcile = Self.body(of: "func reconcileSynchronizedOutputWatchdog", in: source)
             .map { $0.trimmingCharacters(in: .whitespaces) }
+        let dirtyExit = reconcile.firstIndex(of: "synchronizedOutputWatchdogDirty = false")
         let gate = reconcile.firstIndex(of: "if synchronizedOutputTimeoutDisabled {")
         let upstreamCall = reconcile.firstIndex(of: "applySynchronizedOutputWatchdog(")
-        #expect(gate != nil && upstreamCall != nil && gate! < upstreamCall!, "\(reconcile)")
+        #expect(reconcile.firstIndex(of: "guard synchronizedOutputWatchdogDirty else { return }") == 1, "\(reconcile)")
+        #expect(dirtyExit != nil && gate != nil && upstreamCall != nil && dirtyExit! < gate! && gate! < upstreamCall!,
+                "\(reconcile)")
         if let gate {
-            #expect(reconcile[gate + 1] == "applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)")
+            #expect(reconcile[gate + 1] == "reconcileDisabledSynchronizedOutputWatchdog()")
             #expect(reconcile[gate + 2] == "return")
         }
+
+        // The helper: never inlined, its body exactly the gated call, called only from the gate.
+        let helperDecl = "private func reconcileDisabledSynchronizedOutputWatchdog() {"
+        let lines = source.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        if let decl = lines.firstIndex(of: helperDecl), decl > 0 {
+            #expect(lines[decl - 1] == "@inline(never)", "\(lines[decl - 1])")
+            #expect(lines[decl + 1] == "applySynchronizedOutputWatchdog(active: false, generation: synchronizedOutputGeneration)")
+            #expect(lines[decl + 2] == "}")
+        } else {
+            Issue.record("no \(helperDecl) in Terminal.swift")
+        }
+        let helperCalls = try Self.swiftFiles().flatMap { _, text in
+            text.components(separatedBy: "\n").filter {
+                $0.contains("reconcileDisabledSynchronizedOutputWatchdog()") && !$0.contains("func ")
+            }
+        }
+        #expect(helperCalls.count == 1, "\(helperCalls)")
 
         let apply = Self.body(of: "func applySynchronizedOutputWatchdog(active: Bool, generation: UInt64) {",
                               in: try Self.terminalSource())
