@@ -59,6 +59,44 @@ final class UpstreamOnlyAddsTests {
                 reason: "D8: second line of the same sendMousePacket call (mouse packet = user input); offered upstream: IT-2023"),
         Allowed(file: "Sources/SwiftTerm/Terminal.swift", line: 9390, hash: "6d031297",
                 reason: "D8: third line of the same sendMousePacket call (mouse packet = user input); offered upstream: IT-2023"),
+
+        // D2 (IT-1075): a title rides the frame driver's pending-update tuple
+        // instead of one main-queue hop per title (a TUI spinner retitles every
+        // frame). With no title pending the frame adds no lock and no allocation.
+        Allowed(file: "Sources/SwiftTerm/Apple/AppleTerminalView.swift", line: 2602, hash: "52c361a4",
+                reason: "D2: applyPendingViewUpdates' one existing lock also takes the pending title (per frame; no lock or allocation added); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Apple/AppleTerminalView.swift", line: 2604, hash: "261ce9d5",
+                reason: "D2: second line of the same tuple, which gains `state.pendingTitle`; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3948, hash: "3cc26f57",
+                reason: "D2: setTerminalTitle records the latest title for the next frame instead of a main-queue hop per title; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3949, hash: "4ed13a17",
+                reason: "D2: same body (upstream's onMain hop removed); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3950, hash: "f422eb86",
+                reason: "D2: same body (upstream's onMain hop removed); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3951, hash: "de268967",
+                reason: "D2: same body (the delegate is called from applyPendingViewUpdates instead); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3952, hash: "7ac2ae48",
+                reason: "D2: same body (upstream's onMain closure's end); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/iOS/iOSTerminalView.swift", line: 3833, hash: "3cc26f57",
+                reason: "D2: setTerminalTitle records the latest title for the next frame instead of a main-queue hop per title; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/iOS/iOSTerminalView.swift", line: 3834, hash: "4ed13a17",
+                reason: "D2: same body (upstream's onMain hop removed); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/iOS/iOSTerminalView.swift", line: 3835, hash: "f422eb86",
+                reason: "D2: same body (upstream's onMain hop removed); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/iOS/iOSTerminalView.swift", line: 3836, hash: "de268967",
+                reason: "D2: same body (the delegate is called from applyPendingViewUpdates instead); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/iOS/iOSTerminalView.swift", line: 3837, hash: "7ac2ae48",
+                reason: "D2: same body (upstream's onMain closure's end); offered upstream: IT-2023"),
+
+        // Mac view: one access level and one data race.
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 3606, hash: "6df91429",
+                reason: "scrollWheel is `open`, not `public`: Scape overrides it and calls super, and no addition can make a member overridable; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 2908, hash: "c44383af",
+                reason: "autoscroll: the active check, hit test and dragExtend run under one terminal lock; upstream's unlocked dragExtend races the IO thread; offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 2909, hash: "23c51cf4",
+                reason: "autoscroll: same block (calculateMouseHitLocked inside the lock); offered upstream: IT-2023"),
+        Allowed(file: "Sources/SwiftTerm/Mac/MacTerminalView.swift", line: 2910, hash: "de866c9d",
+                reason: "autoscroll: same block (dragExtend inside the lock); offered upstream: IT-2023"),
     ]
 
     // MARK: the rule
