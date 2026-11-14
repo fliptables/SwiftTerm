@@ -81,7 +81,6 @@ final class ExportAtGroundTests {
                     Issue.record("\(at): a ground cut refused to export")
                     continue
                 }
-                #expect(snapshot.pendingParserBytes == [], "\(at): the pending field is not empty")
                 let replicaCapture = Capture()
                 let replica = Self.make(replicaCapture, responds: false)
                 replica.importState(try TerminalStateSnapshot(encoded: snapshot.encoded()))
@@ -141,7 +140,7 @@ final class ExportAtGroundTests {
         #expect(owner.exportForStreaming() == nil)
         owner.feed(byteArray: [0xac, 0x62])
         #expect(!owner.hasPendingSequence)
-        #expect(try #require(owner.exportState()).pendingParserBytes == [])
+        #expect(owner.exportState() != nil)
     }
 
     // MARK: the parser is upstream's

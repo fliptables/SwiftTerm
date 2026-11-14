@@ -2150,17 +2150,22 @@ extension Buffer {
     // Saved cursor (DECSC) not covered by public API
     var replicationSavedOriginMode: Bool { get { savedOriginMode } set { savedOriginMode = newValue } }
     var replicationSavedMarginMode: Bool { get { savedMarginMode } set { savedMarginMode = newValue } }
-    // IT-2001 merge repair: upstream removed `savedWraparound` and
-    // `savedReverseWraparound` (1b1d50a: DECSC no longer saves DECAWM), so
-    // their two accessors are gone; format v2 drops the two fields.
-
-    // Modes: read here, written through the existing setters
+    var replicationSavedCharacterProtection: Bool {
+        get { savedCharacterProtection } set { savedCharacterProtection = newValue }
+    }
+    var replicationSavedPendingWrap: Bool { get { savedPendingWrap } set { savedPendingWrap = newValue } }
+    /// Restore it last: a cursor move clears it.
+    var replicationPendingWrap: Bool { get { pendingWrap } set { pendingWrap = newValue } }
+    // Modes: read here, written through the existing setters (so
+    // `bulkInsertBlocked` is derived, never decoded)
     var replicationInsertMode: Bool { insertMode }
     var replicationMarginMode: Bool { marginMode }
     var replicationWraparound: Bool { wraparound }
+    var replicationCharacterProtection: Bool { characterProtection }
     func replicationSetInsertMode(_ value: Bool) { setInsertMode(value) }
     func replicationSetMarginMode(_ value: Bool) { setMarginMode(value) }
     func replicationSetWraparound(_ value: Bool) { setWraparound(value) }
+    func replicationSetCharacterProtection(_ value: Bool) { setCharacterProtection(value) }
 
     // OSC 133 state
     var replicationSemanticContent: SemanticContent { get { semanticContent } set { semanticContent = newValue } }

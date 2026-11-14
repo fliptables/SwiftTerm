@@ -18,7 +18,8 @@ import Foundation
 
 /// A run of history lines of one buffer, top to bottom. Chunk 0 is the one nearest the screen.
 public struct TerminalHistoryChunk: Equatable, Sendable {
-    public static let formatVersion: UInt32 = 1
+    /// The snapshot's one format version (IT-2001 format v2).
+    public static let formatVersion: UInt32 = TerminalStateSnapshot.formatVersion
     static let magic: [UInt8] = Array("STSH".utf8)
 
     /// Which buffer the lines belong to.

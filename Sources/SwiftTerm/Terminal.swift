@@ -11025,6 +11025,79 @@ extension Terminal {
     var replicationKittyPasteEventsEnabled: Bool {
         get { kittyPasteEventsEnabled } set { kittyPasteEventsEnabled = newValue }
     }
+    var replicationCursorStartsNewGrapheme: Bool {
+        get { cursorStartsNewGrapheme } set { cursorStartsNewGrapheme = newValue }
+    }
+    var replicationBackarrowKeyMode: Bool { get { backarrowKeyMode } set { backarrowKeyMode = newValue } }
+    var replicationReportedDECModes: Set<Int> {
+        get { reportedOnly.decModes } set { reportedOnly.decModes = newValue }
+    }
+    var replicationAttributeChangeExtent: Int {
+        get { reportedOnly.attributeChangeExtent } set { reportedOnly.attributeChangeExtent = newValue }
+    }
+    var replicationKeyboardActionMode: Bool { get { keyboardActionMode } set { keyboardActionMode = newValue } }
+    var replicationSendReceiveMode: Bool { get { sendReceiveMode } set { sendReceiveMode = newValue } }
+    /// The terminal's flag only; each buffer keeps its own.
+    var replicationCharacterProtection: Bool { get { characterProtection } set { characterProtection = newValue } }
+    /// 0 off, 1 dec, 2 iso.
+    var replicationCharacterProtectionModeCode: UInt8 {
+        get {
+            switch characterProtectionMode {
+            case .off: return 0
+            case .dec: return 1
+            case .iso: return 2
+            }
+        }
+        set { characterProtectionMode = newValue == 1 ? .dec : newValue == 2 ? .iso : .off }
+    }
+    var replicationReverseWraparoundExtended: Bool {
+        get { reverseWraparoundExtended } set { reverseWraparoundExtended = newValue }
+    }
+    var replicationNoClearOnColumnChange: Bool {
+        get { noClearOnColumnChange } set { noClearOnColumnChange = newValue }
+    }
+    var replicationMoreFix: Bool { get { cold.moreFix } set { cold.moreFix = newValue } }
+    /// The OSC 10/11 colour still in force (once the host changes the colour after
+    /// the OSC, the host's colour is the current one), or nil.
+    var replicationOscForeground: Color? {
+        guard let slot = cold.foregroundOverride, slot.osc == foregroundColor else { return nil }
+        return slot.osc
+    }
+    var replicationOscBackground: Color? {
+        guard let slot = cold.backgroundOverride, slot.osc == backgroundColor else { return nil }
+        return slot.osc
+    }
+    /// OSC 10/11: `foreground`/`background` over this terminal's host colour, or the
+    /// host colour back (the OSC 110/111 path) when nil. OSC 12: `cursor`. Setting a
+    /// colour tells the delegate, as those sequences do.
+    func replicationSetOscColors(foreground: Color?, background: Color?, cursor: Color?) {
+        if let osc = foreground {
+            cold.foregroundOverride = Terminal.dynamicColorOverride(cold.foregroundOverride, current: foregroundColor, new: osc)
+            foregroundColor = osc
+        } else {
+            oscResetDynamicColor(foreground: true)
+        }
+        if let osc = background {
+            cold.backgroundOverride = Terminal.dynamicColorOverride(cold.backgroundOverride, current: backgroundColor, new: osc)
+            backgroundColor = osc
+        } else {
+            oscResetDynamicColor(foreground: false)
+        }
+        cursorColor = cursor
+    }
+    /// The stored program status records, oldest update first.
+    var replicationProgramStatusRecords: [TerminalProgramStatus] { programStatusStore.replicationRecords }
+    /// Replaces the records (replayed in order, so order and replacement hold) and
+    /// tells the delegate when they changed, as an OSC 7501 that changes them does.
+    func replicationSetProgramStatusRecords(_ records: [TerminalProgramStatus]) {
+        let before = programStatusStore.replicationRecords
+        programStatusStore = TerminalProgramStatusStore(replicationRecords: records)
+        if programStatusStore.replicationRecords != before {
+            tdel?.programStatusChanged(source: self, records: programStatusRecords)
+        }
+    }
+    /// Images are not carried: upstream's own clear, as RIS does.
+    func replicationClearImages() { clearAllKittyImages() }
 
     // Character sets and attributes
     var replicationCharset: [UInt8: String]? { get { charset } set { charset = newValue } }

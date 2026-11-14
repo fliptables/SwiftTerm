@@ -261,3 +261,15 @@ private struct ProgramStatusReport {
         return text
     }
 }
+
+// IT-2001 format v2: the store as the snapshot carries it.
+extension TerminalProgramStatusStore {
+    /// The stored records, oldest update first: replaying them through `replace`
+    /// rebuilds both the records and their update order.
+    var replicationRecords: [TerminalProgramStatus] { updateOrder.compactMap { records[$0] } }
+
+    init(replicationRecords: [TerminalProgramStatus]) {
+        self.init()
+        for record in replicationRecords { replace(record) }
+    }
+}

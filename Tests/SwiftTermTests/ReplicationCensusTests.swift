@@ -22,15 +22,15 @@ final class ReplicationCensusTests {
     // MARK: The census
 
     static let carriedTerminal: Set<String> = [
-        "programStatusStore", "_cols", "_rows", "tabStopWidth", "synchronizedOutputActive",
+        "programStatusStore", "_cols", "_rows", "synchronizedOutputActive",
         "applicationKeypad", "applicationCursor", "reverseColors", "keyboardModeNormal", "keyboardModeAlt",
         "sendFocus", "_currentBidiState", "bidiArrowKeySwap", "savedPrivateModes", "cursorHidden",
         "originMode", "marginMode", "insertMode", "keyboardActionMode", "sendReceiveMode",
         "backarrowKeyMode", "characterProtectionMode", "characterProtection", "wraparound",
         "bracketedPasteMode", "alternateScrollMode", "colorSchemeUpdatesEnabled", "colorScheme",
-        "charset", "gCharsets", "gcharset", "reverseWraparound", "reverseWraparoundExtended",
+        "charset", "gCharsets", "reverseWraparound", "reverseWraparoundExtended",
         "curAttr", "currentEraseAttribute", "gLevel", "cursorBlink", "allow80To132",
-        "noClearOnColumnChange", "lineFeedMode", "smoothScroll", "ansiColors", "cc",
+        "noClearOnColumnChange", "ansiColors", "cc",
         "hostCurrentDirectory", "hostCurrentDocument", "mouseProtocol", "foregroundColor",
         "backgroundColor", "cursorColor", "mouseMode", "mouseShiftCapture", "xtermTitleSetUtf",
         "xtermTitleSetHex", "xtermTitleQueryUtf", "xtermTitleQueryHex", "conformance",
@@ -47,10 +47,10 @@ final class ReplicationCensusTests {
     ]
 
     static let carriedBuffer: Set<String> = [
-        "xDisp", "_yDisp", "xBase", "_x", "_y", "_yBase", "linesTop", "_scrollBottom", "_scrollTop",
+        "_yDisp", "_x", "_y", "_yBase", "linesTop", "_scrollBottom", "_scrollTop",
         "tabStops", "savedX", "savedY", "savedOriginMode", "savedMarginMode", "savedCharacterProtection",
-        "savedPendingWrap", "_marginLeft", "_marginRight", "savedAttr", "savedCharset", "hasScrollback",
-        "_cols", "_rows", "scrollback", "insertMode", "characterProtection", "bulkInsertBlocked",
+        "savedPendingWrap", "_marginLeft", "_marginRight", "savedAttr", "savedCharset",
+        "_cols", "_rows", "insertMode", "characterProtection", "bulkInsertBlocked",
         "marginMode", "wraparound", "semanticContent", "semanticInput", "semanticClickMode",
         "semanticUsesSpecialCursorKeys", "pendingWrap", "semanticGroupCounter", "activeSemanticGroupID",
         "defaultBidiState",
@@ -186,6 +186,38 @@ final class ReplicationCensusTests {
         "buffer.savedPendingWrap": b(String(repeating: "x", count: 30) + "\u{1b}7"),
         "buffer.savedCharacterProtection": b("\u{1b}[1\"q\u{1b}7"),
         "buffer.characterProtection": b("\u{1b}[1\"q"),
+        // v1 fields the corpus does not reach
+        "buffer.defaultBidiState": b("\u{1b}[?2500h"),
+        "terminal._currentBidiState": b("\u{1b}[?2500h"),
+        "terminal.bidiArrowKeySwap": b("\u{1b}[?1243h"),
+        "buffer.savedAttr": b("\u{1b}[1m\u{1b}7\u{1b}[m"),
+        "buffer.savedCharset": b("\u{1b}(0\u{1b}7\u{1b}(B"),
+        "buffer.savedMarginMode": b("\u{1b}[?69h\u{1b}7\u{1b}[?69l"),
+        "buffer.savedOriginMode": b("\u{1b}[?6h\u{1b}7\u{1b}[?6l"),
+        "buffer.semanticUsesSpecialCursorKeys": b("\u{1b}]133;A;special_key=1\u{7}"),
+        "buffer.wraparound": b("\u{1b}[?7l"),
+        "terminal.wraparound": b("\u{1b}[?7l"),
+        "terminal.allow80To132": b("\u{1b}[?40h"),
+        "terminal.alternateScrollMode": b("\u{1b}[?1007l"),
+        "terminal.cc": b("\u{1b} G"),
+        "terminal.colorScheme": { $0.updateColorScheme(.light) },
+        "terminal.colorSchemeUpdatesEnabled": b("\u{1b}[?2031h"),
+        "terminal.conformance": b("\u{1b}[61\"p"),
+        // OSC 6 needs a trusting delegate; the field is set as OSC 6 sets it.
+        "terminal.hostCurrentDocument": { $0.replicationHostCurrentDocument = "file://host/doc" },
+        "terminal.inBandSizeReportsEnabled": b("\u{1b}[?2048h"),
+        "terminal.kittyPasteEventsEnabled": b("\u{1b}[?5522h"),
+        "terminal.visibilityReportsEnabled": b("\u{1b}[?2033h"),
+        "terminal.mouseShiftCapture": b("\u{1b}[>1s"),
+        "terminal.reverseColors": b("\u{1b}[?5h"),
+        "terminal.reverseWraparound": b("\u{1b}[?45h"),
+        // Set as XTSAVE and XTWINOPS 22;1 set them.
+        "terminal.savedPrivateModes": { $0.replicationSavedPrivateModes = [2004: true] },
+        "terminal.terminalIconStack": { $0.replicationTerminalIconStack = ["icon"] },
+        "terminal.xtermTitleSetHex": b("\u{1b}[>0t"),
+        "terminal.xtermTitleQueryHex": b("\u{1b}[>1t"),
+        "terminal.xtermTitleSetUtf": b("\u{1b}[>2t"),
+        "terminal.xtermTitleQueryUtf": b("\u{1b}[>3t"),
     ]
 
     @Test func everyCarriedFieldIsCoveredByTheCorpusOrOneHandRow() {

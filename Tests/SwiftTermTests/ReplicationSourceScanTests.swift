@@ -42,6 +42,8 @@ struct ReplicationSourceScanTests {
     static let allowedTdelMembers: [String: String] = [
         "replicationNotifyBufferActivated":
             "tells the host the active buffer after an import; a notification, carries no bytes toward the child",
+        "replicationSetProgramStatusRecords":
+            "tells the host the imported program status, as an OSC 7501 does; a notification, carries no bytes toward the child",
     ]
 
     /// Identifiers in the replication files that are spelled like a non-public

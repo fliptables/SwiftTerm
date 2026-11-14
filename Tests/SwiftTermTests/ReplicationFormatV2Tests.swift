@@ -30,6 +30,21 @@ final class ReplicationFormatV2Tests {
         b.feed(text: text)
     }
 
+    /// Plan §5: STSS and STSH share one version constant, 2, and each refuses version 1.
+    @Test func versionOneIsRefusedForBothMagics() throws {
+        #expect(TerminalStateSnapshot.formatVersion == 2)
+        #expect(TerminalHistoryChunk.formatVersion == TerminalStateSnapshot.formatVersion)
+        let owner = Self.make()
+        owner.feed(text: (0..<20).map { "line \($0)\r\n" }.joined())
+        var screen = try #require(owner.exportState()).encoded()
+        screen.replaceSubrange(4..<8, with: [1, 0, 0, 0])
+        #expect(throws: TerminalStateSnapshotError.unsupportedVersion(1)) { try TerminalStateSnapshot(encoded: screen) }
+        let export = try #require(owner.exportForStreaming())
+        var chunk = try #require(export.historyChunks(linesPerChunk: 5).first).encoded()
+        chunk.replaceSubrange(4..<8, with: [1, 0, 0, 0])
+        #expect(throws: TerminalStateSnapshotError.unsupportedVersion(1)) { try TerminalHistoryChunk(encoded: chunk) }
+    }
+
     /// Plan §5: a pending-wrap cut on the ALTERNATE buffer continues as on the owner.
     @Test func aPendingWrapOnTheAlternateScreenContinues() throws {
         let owner = Self.make(), replica = Self.make()

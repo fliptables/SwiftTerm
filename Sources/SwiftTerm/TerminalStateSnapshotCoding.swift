@@ -120,7 +120,6 @@ extension TerminalStateSnapshot {
         modes.encode(&body, attributes: &attributes)
         normal.encode(&body, attributes: &attributes, payloads: &payloads)
         alt.encode(&body, attributes: &attributes, payloads: &payloads)
-        body.raw(pendingParserBytes)
         body.uint(droppedPayloadCount)
 
         w.uint(attributes.list.count)
@@ -151,11 +150,9 @@ extension TerminalStateSnapshot {
         let modes = try TerminalModesImage(&r, attributes: attributes)
         let normal = try BufferImage(&r, attributes: attributes, payloads: payloads)
         let alt = try BufferImage(&r, attributes: attributes, payloads: payloads)
-        let pending = try r.raw()
         let dropped = try r.uint()
         guard r.position == bytes.count else { throw TerminalStateSnapshotError.invalid("trailing bytes") }
-        self.init(modes: modes, normal: normal, alt: alt, pendingParserBytes: pending,
-                  droppedPayloadCount: dropped)
+        self.init(modes: modes, normal: normal, alt: alt, droppedPayloadCount: dropped)
     }
 }
 
@@ -383,6 +380,33 @@ enum SnapshotCodec {
     }
 
     static let cursorStyles: [CursorStyle] = CursorStyle.allCases
+
+    static func write(_ record: TerminalProgramStatus, _ w: inout SnapshotWriter) {
+        w.string(record.id); w.string(record.state.rawValue)
+        w.optional(record.kind) { $0.string($1.rawValue) }
+        w.optional(record.progress) { $0.int($1) }
+        for text in [record.app, record.effectiveApp, record.title, record.message] {
+            w.optional(text) { $0.string($1) }
+        }
+    }
+
+    static func readProgramStatus(_ r: inout SnapshotReader) throws -> TerminalProgramStatus {
+        let id = try r.string()
+        guard let state = TerminalProgramStatusState(rawValue: try r.string()) else {
+            throw TerminalStateSnapshotError.invalid("program state")
+        }
+        let kind = try r.optional { r -> TerminalProgramStatusKind in
+            guard let kind = TerminalProgramStatusKind(rawValue: try r.string()) else {
+                throw TerminalStateSnapshotError.invalid("program status kind")
+            }
+            return kind
+        }
+        let progress = try r.optional { try $0.int() }
+        var texts: [String?] = []
+        for _ in 0..<4 { texts.append(try r.optional { try $0.string() }) }
+        return TerminalProgramStatus(id: id, state: state, kind: kind, progress: progress, app: texts[0],
+                                     effectiveApp: texts[1], title: texts[2], message: texts[3])
+    }
 }
 
 // MARK: - Modes
@@ -435,6 +459,17 @@ extension TerminalModesImage {
             for title in stack { w.string(title) }
         }
         w.bool(visibilityReportsEnabled); w.bool(inBandSizeReportsEnabled); w.bool(kittyPasteEventsEnabled)
+        w.bool(cursorStartsNewGrapheme); w.bool(keyboardActionMode); w.bool(sendReceiveMode); w.bool(backarrowKeyMode)
+        w.u8(characterProtectionMode); w.bool(characterProtection)
+        w.bool(reverseWraparoundExtended); w.bool(noClearOnColumnChange)
+        w.uint(reportedDECModes.count)
+        for mode in reportedDECModes { w.int(mode) }
+        w.int(attributeChangeExtent); w.bool(moreFix)
+        for color in [oscForeground, oscBackground, cursorColor] {
+            w.optional(color) { w, rgb in w.uint(Int(rgb.red)); w.uint(Int(rgb.green)); w.uint(Int(rgb.blue)) }
+        }
+        w.uint(programStatus.count)
+        for record in programStatus { SnapshotCodec.write(record, &w) }
     }
 
     init(_ r: inout SnapshotReader, attributes: [Attribute]) throws {
@@ -510,6 +545,29 @@ extension TerminalModesImage {
         terminalTitleStack = stacks[0]; terminalIconStack = stacks[1]
         visibilityReportsEnabled = try r.bool(); inBandSizeReportsEnabled = try r.bool()
         kittyPasteEventsEnabled = try r.bool()
+        cursorStartsNewGrapheme = try r.bool(); keyboardActionMode = try r.bool()
+        sendReceiveMode = try r.bool(); backarrowKeyMode = try r.bool()
+        characterProtectionMode = try r.u8()
+        guard characterProtectionMode <= 2 else { throw TerminalStateSnapshotError.invalid("protection mode") }
+        characterProtection = try r.bool()
+        reverseWraparoundExtended = try r.bool(); noClearOnColumnChange = try r.bool()
+        let modeCount = try r.count(max: 4096, "reported modes")
+        var reported: [Int] = []
+        for _ in 0..<modeCount { reported.append(try r.int()) }
+        reportedDECModes = reported
+        attributeChangeExtent = try r.int(); moreFix = try r.bool()
+        var colors: [RGB16?] = []
+        for _ in 0..<3 {
+            colors.append(try r.optional { r in
+                RGB16(red: UInt16(truncatingIfNeeded: try r.uint()), green: UInt16(truncatingIfNeeded: try r.uint()),
+                      blue: UInt16(truncatingIfNeeded: try r.uint()))
+            })
+        }
+        oscForeground = colors[0]; oscBackground = colors[1]; cursorColor = colors[2]
+        let statusCount = try r.count(max: TerminalProgramStatusStore.maximumRecords, "program status")
+        var records: [TerminalProgramStatus] = []
+        for _ in 0..<statusCount { records.append(try SnapshotCodec.readProgramStatus(&r)) }
+        programStatus = records
     }
 }
 
@@ -534,10 +592,10 @@ extension BufferImage {
         }
         if tabStops.count % 8 != 0 { w.u8(packed) }
         w.int(savedX); w.int(savedY)
-        w.bool(savedOriginMode); w.bool(savedMarginMode); w.bool(savedWraparound); w.bool(savedReverseWraparound)
+        w.bool(savedOriginMode); w.bool(savedMarginMode); w.bool(savedCharacterProtection); w.bool(savedPendingWrap)
         w.uint(attributes.id(savedAttr))
         SnapshotCodec.write(savedCharset, &w)
-        w.bool(insertMode); w.bool(marginMode); w.bool(wraparound)
+        w.bool(insertMode); w.bool(marginMode); w.bool(wraparound); w.bool(characterProtection); w.bool(pendingWrap)
         w.u8(CellArena.semanticContentCode(for: semanticContent))
         w.u8(SnapshotCodec.code(semanticInput))
         w.u8(SnapshotCodec.code(semanticClickMode))
@@ -575,10 +633,11 @@ extension BufferImage {
         tabStops = stops
         savedX = try r.int(); savedY = try r.int()
         savedOriginMode = try r.bool(); savedMarginMode = try r.bool()
-        savedWraparound = try r.bool(); savedReverseWraparound = try r.bool()
+        savedCharacterProtection = try r.bool(); savedPendingWrap = try r.bool()
         savedAttr = try SnapshotCodec.attribute(&r, attributes)
         savedCharset = try SnapshotCodec.readCharset(&r)
         insertMode = try r.bool(); marginMode = try r.bool(); wraparound = try r.bool()
+        characterProtection = try r.bool(); pendingWrap = try r.bool()
         semanticContent = CellArena.semanticContent(for: try r.u8())
         semanticInput = try SnapshotCodec.inputState(try r.u8())
         semanticClickMode = try SnapshotCodec.clickMode(try r.u8())

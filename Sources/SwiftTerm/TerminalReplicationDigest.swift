@@ -75,6 +75,10 @@ extension Terminal {
         "portableRenderCells": "render cache",
         "lineChanges": "render change tracking",
         "payloads": "atom identity, slots and collection thresholds (payloads are compared by target)",
+        "tabStopWidth": "the host's option, set only at construction",
+        "smoothScroll": "never set: SwiftTerm has no smooth scrolling",
+        "lineFeedMode": "set only from the host's convertEol option",
+        "gcharset": "never set except to 0 at reset",
     ]
     #if DEBUG
     static let debugExcludedTerminalProperties: [String: String] = [
@@ -120,6 +124,10 @@ extension Terminal {
         "semanticPromptStartLine": "compared as a row",
         "semanticPromptStartRowCache": "search hint",
         "semanticPromptRowScanCount": "diagnostic counter",
+        "xBase": "always 0: SwiftTerm has no horizontal scroll",
+        "xDisp": "always 0: SwiftTerm has no horizontal scroll",
+        "hasScrollback": "fixed at construction from the options the replica shares",
+        "scrollback": "fixed at construction from the options the replica shares",
     ]
 
     /// Every stored property of `Buffer` the digest leaves out, on this build.
@@ -189,8 +197,8 @@ extension Terminal {
     /// The mirror of `terminal`'s `Terminal` part: a subclass's mirror lists only the
     /// subclass's own stored properties.
     @_spi(Replication)
-    public static func terminalMirror(_ terminal: Terminal) -> Mirror {
-        var mirror = Mirror(reflecting: terminal)
+    public static func terminalMirror(_ subject: Terminal) -> Mirror {
+        var mirror = Mirror(reflecting: subject)
         while mirror.subjectType != Terminal.self, let parent = mirror.superclassMirror { mirror = parent }
         return mirror
     }

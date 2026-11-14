@@ -9,16 +9,22 @@
 //  The snapshot copies the model instead of re-deriving it from bytes: both
 //  buffers with every line, wrap flag, cell, grapheme, hyperlink and semantic
 //  mark; the cursor, saved cursors, margins and tab stops; every mode; the
-//  Kitty keyboard stacks; titles and their stacks; and the bytes of any
-//  sequence the parser has only partly read.
+//  Kitty keyboard stacks; titles and their stacks; the colours an application
+//  set with OSC 10, 11 and 12; and the program status records. It is taken
+//  only at ground, so no parser state travels.
+//
+//  Which fields: the census (ReplicationCensusTests). A field is carried when
+//  a reader of the replica can observe it: what is drawn, what the next byte
+//  does, what a query would answer, what a key at the viewer sends.
 //
 //  What it does not carry, by design (each is listed in `notCarried`):
 //  - Kitty graphics and sixel images: declared lost until the application
-//    redraws.
+//    redraws. An import clears the importer's images.
 //  - Host configuration the importing view owns: the installed palette and
-//    default colours, the options it was created with (only the cursor style,
-//    which an application changes, is carried), selection, scroll position
-//    chosen by the user, focus, visibility and pixel geometry.
+//    default colours (an OSC colour is installed over the importer's own), the
+//    options it was created with (only the cursor style, which an application
+//    changes, is carried), selection, scroll position chosen by the user,
+//    focus, visibility and pixel geometry.
 //  - Input-side state: the OSC 133 input scanner and clipboard transactions.
 //  - A cell payload that is not a `String` (hyperlinks are strings).
 //
@@ -31,8 +37,9 @@ import Foundation
 /// A terminal's emulator state, exported by ``Terminal/exportState()`` and
 /// applied by ``Terminal/importState(_:)``.
 public struct TerminalStateSnapshot: Equatable, Sendable {
-    /// The version of ``encoded()``. A decoder refuses any other.
-    public static let formatVersion: UInt32 = 1
+    /// The version of ``encoded()`` and of ``TerminalHistoryChunk/encoded()``
+    /// (one constant for both). A decoder refuses any other, version 1 included.
+    public static let formatVersion: UInt32 = 2
     static let magic: [UInt8] = Array("STSS".utf8)
 
     /// The categories of state the snapshot deliberately leaves out.
@@ -58,10 +65,6 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
     public var rows: Int { modes.rows }
     /// Whether the alternate screen was active.
     public var alternateScreenActive: Bool { modes.altActive }
-    /// A format v1 field, always empty: a snapshot is taken only at ground
-    /// (IT-2001 D4, export only at ground). The importer still feeds it if a
-    /// v1 snapshot carries bytes. Drop in v2.
-    public internal(set) var pendingParserBytes: [UInt8]
     /// Cells whose payload was dropped because it was not a `String`.
     public internal(set) var droppedPayloadCount: Int
 }
@@ -70,6 +73,11 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
 
 struct RGB16: Equatable, Sendable {
     var red: UInt16, green: UInt16, blue: UInt16
+}
+
+extension RGB16 {
+    init(_ color: Color) { self.init(red: color.red, green: color.green, blue: color.blue) }
+    var color: Color { Color(red: red, green: green, blue: blue) }
 }
 
 struct KittyKeyboardImage: Equatable, Sendable {
@@ -139,6 +147,25 @@ struct TerminalModesImage: Equatable, Sendable {
     var visibilityReportsEnabled: Bool
     var inBandSizeReportsEnabled: Bool
     var kittyPasteEventsEnabled: Bool
+    // Format v2
+    var cursorStartsNewGrapheme: Bool
+    var keyboardActionMode: Bool
+    var sendReceiveMode: Bool
+    var backarrowKeyMode: Bool
+    /// `Terminal.CharacterProtectionMode`: 0 off, 1 dec, 2 iso.
+    var characterProtectionMode: UInt8
+    var characterProtection: Bool
+    var reverseWraparoundExtended: Bool
+    var noClearOnColumnChange: Bool
+    var reportedDECModes: [Int]
+    var attributeChangeExtent: Int
+    var moreFix: Bool
+    /// The colours set by OSC 10, 11 and 12, without the host colour under them.
+    var oscForeground: RGB16?
+    var oscBackground: RGB16?
+    var cursorColor: RGB16?
+    /// Oldest update first.
+    var programStatus: [TerminalProgramStatus]
 }
 
 struct CellImage: Equatable, Sendable {
@@ -192,13 +219,16 @@ struct BufferImage: Equatable, Sendable {
     var savedY: Int
     var savedOriginMode: Bool
     var savedMarginMode: Bool
-    var savedWraparound: Bool
-    var savedReverseWraparound: Bool
+    var savedCharacterProtection: Bool
+    var savedPendingWrap: Bool
     var savedAttr: Attribute
     var savedCharset: [UInt8: String]?
     var insertMode: Bool
     var marginMode: Bool
     var wraparound: Bool
+    var characterProtection: Bool
+    /// Restored last: a cursor move clears it.
+    var pendingWrap: Bool
     var semanticContent: SemanticContent
     var semanticInput: SemanticInputState
     var semanticClickMode: SemanticPromptClickMode
@@ -304,12 +334,26 @@ extension Terminal {
             terminalIconStack: replicationTerminalIconStack,
             visibilityReportsEnabled: visibilityReportsEnabled,
             inBandSizeReportsEnabled: inBandSizeReportsEnabled,
-            kittyPasteEventsEnabled: kittyPasteEventsEnabled)
+            kittyPasteEventsEnabled: kittyPasteEventsEnabled,
+            cursorStartsNewGrapheme: replicationCursorStartsNewGrapheme,
+            keyboardActionMode: replicationKeyboardActionMode,
+            sendReceiveMode: replicationSendReceiveMode,
+            backarrowKeyMode: replicationBackarrowKeyMode,
+            characterProtectionMode: replicationCharacterProtectionModeCode,
+            characterProtection: replicationCharacterProtection,
+            reverseWraparoundExtended: replicationReverseWraparoundExtended,
+            noClearOnColumnChange: replicationNoClearOnColumnChange,
+            reportedDECModes: replicationReportedDECModes.sorted(),
+            attributeChangeExtent: replicationAttributeChangeExtent,
+            moreFix: replicationMoreFix,
+            oscForeground: replicationOscForeground.map(RGB16.init),
+            oscBackground: replicationOscBackground.map(RGB16.init),
+            cursorColor: cursorColor.map(RGB16.init),
+            programStatus: replicationProgramStatusRecords)
         let normalImage = Terminal.bufferImage(replicationNormalBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         let altImage = Terminal.bufferImage(replicationAltBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
-            pendingParserBytes: [],
             droppedPayloadCount: dropped)
     }
 
@@ -357,13 +401,13 @@ extension Terminal {
             savedX: buffer.savedX, savedY: buffer.savedY,
             savedOriginMode: buffer.replicationSavedOriginMode,
             savedMarginMode: buffer.replicationSavedMarginMode,
-            // IT-2001 merge repair: no such state upstream; placeholders until format v2
-            // removes the two fields.
-            savedWraparound: false,
-            savedReverseWraparound: false,
+            savedCharacterProtection: buffer.replicationSavedCharacterProtection,
+            savedPendingWrap: buffer.replicationSavedPendingWrap,
             savedAttr: buffer.savedAttr, savedCharset: buffer.savedCharset,
             insertMode: buffer.replicationInsertMode, marginMode: buffer.replicationMarginMode,
             wraparound: buffer.replicationWraparound,
+            characterProtection: buffer.replicationCharacterProtection,
+            pendingWrap: buffer.replicationPendingWrap,
             semanticContent: buffer.replicationSemanticContent,
             semanticInput: buffer.replicationSemanticInput,
             semanticClickMode: buffer.replicationSemanticClickMode,
@@ -406,13 +450,20 @@ extension Terminal {
 // MARK: - Import
 
 extension Terminal {
-    /// Replaces this terminal's emulator state with `snapshot`, then feeds the
-    /// snapshot's pending parser bytes. Call under `terminalLock`, on a
-    /// terminal whose options match the exporter's (scrollback, palette
-    /// strategy). A replica sets ``respondsToQueries`` to `false` first.
+    /// Replaces this terminal's emulator state with `snapshot`. Call under
+    /// `terminalLock`, on a terminal whose options match the exporter's
+    /// (scrollback, palette strategy). A replica sets ``respondsToQueries`` to
+    /// `false` first.
+    ///
+    /// The importer's images are cleared (images are not carried), and the
+    /// colours an application set with OSC 10, 11 and 12 are installed over the
+    /// importer's own host colours, telling the delegate as those sequences do.
     public func importState(_ snapshot: TerminalStateSnapshot) {
         let modes = snapshot.modes
         var payloads: [String: TinyAtom] = [:]
+
+        // Upstream's own clear, as RIS does: nothing stale is drawn over the import.
+        replicationClearImages()
 
         replicationCols = modes.cols
         replicationRows = modes.rows
@@ -489,6 +540,18 @@ extension Terminal {
         replicationVisibilityReportsEnabled = modes.visibilityReportsEnabled
         replicationInBandSizeReportsEnabled = modes.inBandSizeReportsEnabled
         replicationKittyPasteEventsEnabled = modes.kittyPasteEventsEnabled
+        replicationKeyboardActionMode = modes.keyboardActionMode
+        replicationSendReceiveMode = modes.sendReceiveMode
+        replicationBackarrowKeyMode = modes.backarrowKeyMode
+        replicationCharacterProtectionModeCode = modes.characterProtectionMode
+        // The flag only: each buffer's own protection is restored with the buffer.
+        replicationCharacterProtection = modes.characterProtection
+        replicationReverseWraparoundExtended = modes.reverseWraparoundExtended
+        replicationNoClearOnColumnChange = modes.noClearOnColumnChange
+        replicationReportedDECModes = Set(modes.reportedDECModes)
+        replicationAttributeChangeExtent = modes.attributeChangeExtent
+        replicationMoreFix = modes.moreFix
+        replicationSetProgramStatusRecords(modes.programStatus)
 
         replicationResetParser()
         if modes.synchronizedOutputActive {
@@ -496,9 +559,12 @@ extension Terminal {
         } else if synchronizedOutputActive {
             replicationEndSynchronizedOutput()
         }
-        if !snapshot.pendingParserBytes.isEmpty {
-            feed(byteArray: snapshot.pendingParserBytes)
-        }
+        replicationSetOscColors(foreground: modes.oscForeground?.color, background: modes.oscBackground?.color,
+                                cursor: modes.cursorColor?.color)
+        replicationCursorStartsNewGrapheme = modes.cursorStartsNewGrapheme
+        // Last: anything that moves the cursor clears it.
+        normal.replicationPendingWrap = snapshot.normal.pendingWrap
+        alt.replicationPendingWrap = snapshot.alt.pendingWrap
         refresh(startRow: 0, endRow: rows - 1)
         replicationNotifyBufferActivated()
     }
@@ -530,13 +596,14 @@ extension Terminal {
         buffer.savedY = image.savedY
         buffer.replicationSavedOriginMode = image.savedOriginMode
         buffer.replicationSavedMarginMode = image.savedMarginMode
-        // IT-2001 merge repair: `savedWraparound` / `savedReverseWraparound` have no
-        // state to restore upstream; format v2 removes them.
+        buffer.replicationSavedCharacterProtection = image.savedCharacterProtection
+        buffer.replicationSavedPendingWrap = image.savedPendingWrap
         buffer.savedAttr = image.savedAttr
         buffer.savedCharset = image.savedCharset
         buffer.replicationSetInsertMode(image.insertMode)
         buffer.replicationSetMarginMode(image.marginMode)
         buffer.replicationSetWraparound(image.wraparound)
+        buffer.replicationSetCharacterProtection(image.characterProtection)
         buffer.replicationSemanticContent = image.semanticContent
         buffer.replicationSemanticInput = image.semanticInput
         buffer.replicationSemanticClickMode = image.semanticClickMode

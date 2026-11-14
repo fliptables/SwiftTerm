@@ -42,7 +42,6 @@ final class ExportRefusalTests {
         owner.feed(byteArray: Self.overLarge)
         owner.feed(byteArray: [0x07] + Array("after".utf8))
         let snapshot = try #require(owner.exportState())
-        #expect(snapshot.pendingParserBytes == [])
         let replica = Self.make(responds: false)
         replica.importState(try TerminalStateSnapshot(encoded: snapshot.encoded()))
         #expect(owner.replicationDigest() == replica.replicationDigest())
