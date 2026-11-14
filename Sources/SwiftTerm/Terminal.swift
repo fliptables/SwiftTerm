@@ -10949,6 +10949,8 @@ extension Terminal {
     var replicationCols: Int { get { _cols } set { _cols = newValue } }
     var replicationRows: Int { get { _rows } set { _rows = newValue } }
     var replicationCellArena: CellArena { cellArena }
+    /// Read only: import builds buffers with the importer's own width (8 on every terminal; not carried).
+    var replicationTabStopWidth: Int { tabStopWidth }
     var replicationNormalBuffer: Buffer { get { normalBuffer } set { normalBuffer = newValue } }
     var replicationAltBuffer: Buffer { get { altBuffer } set { altBuffer = newValue } }
     /// The active buffer. Set it to ``replicationNormalBuffer`` or ``replicationAltBuffer``.

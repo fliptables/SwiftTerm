@@ -567,7 +567,7 @@ extension Terminal {
     }
 
     private func makeBuffer(_ image: BufferImage, payloads: inout [String: TinyAtom]) -> Buffer {
-        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabStopWidth: tabStopWidth,
+        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabWidth: replicationTabStopWidth,
                                             scrollback: image.scrollback, bidiState: image.defaultBidiState,
                                             arena: replicationCellArena)
         buffer.replicationTerminal = self

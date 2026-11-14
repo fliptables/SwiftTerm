@@ -2126,9 +2126,9 @@ public final class Buffer {
 // stored property or method and adds no logic.
 extension Buffer {
     /// Creates an empty buffer that shares the terminal's cell arena.
-    static func replicationMake(cols: Int, rows: Int, tabStopWidth: Int, scrollback: Int?,
+    static func replicationMake(cols: Int, rows: Int, tabWidth: Int, scrollback: Int?,
                                 bidiState: BidiPresentationState, arena: CellArena) -> Buffer {
-        Buffer(cols: cols, rows: rows, tabStopWidth: tabStopWidth, scrollback: scrollback,
+        Buffer(cols: cols, rows: rows, tabStopWidth: tabWidth, scrollback: scrollback,
                bidiState: bidiState, arena: arena)
     }
     var replicationTerminal: Terminal! { get { terminal } set { terminal = newValue } }
