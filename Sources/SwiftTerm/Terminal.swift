@@ -902,6 +902,16 @@ open class Terminal {
         parser.currentState != .ground || !readingBuffer.putbackBuffer.isEmpty
     }
 
+    /// The view's scroll lock: `true` while the user has scrolled the view
+    /// away from the bottom, so new output does not move the viewport. A
+    /// forwarder to upstream's internal `userScrolling`, which stays as
+    /// upstream declares it: a public stored property here would keep a
+    /// dynamic exclusivity check on each of its scroll-path reads (IT-2001).
+    public var isUserScrolling: Bool {
+        get { userScrolling }
+        set { userScrolling = newValue }
+    }
+
     /// Whether this terminal answers the queries it parses (device
     /// attributes, status and cursor reports, mode and colour queries, Kitty
     /// replies, unsolicited reports such as in-band size changes). A passive
@@ -964,7 +974,7 @@ open class Terminal {
     var refreshEnd = -1
     var scrollInvariantRefreshStart = Int.max
     var scrollInvariantRefreshEnd = -1
-    public var userScrolling = false
+    var userScrolling = false
     var lineFeedMode = false
     
     // We do not implement smooth scrolling here, dubious value, but

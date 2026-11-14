@@ -1885,7 +1885,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
 
     // Re-added at the IT-304 upstream merge: upstream's shared
     // updateUserScrollingState (AppleTerminalView) writes this view-level flag and
-    // keeps it in sync with terminal.userScrolling, which remains the public
+    // keeps it in sync with terminal.userScrolling (public as isUserScrolling), the
     // scroll-lock signal Scape consumes.
     var userScrolling = false
 

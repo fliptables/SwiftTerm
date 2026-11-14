@@ -32,5 +32,18 @@ final class UpstreamDeclarationTests {
         #expect(terminal.contains("    public var isUserScrolling: Bool {"),
                 "Scape's public forwarder `isUserScrolling` is missing")
     }
+
+    private final class Sink: TerminalDelegate {
+        func send(source: Terminal, data: ArraySlice<UInt8>) {}
+    }
+
+    @Test func isUserScrollingForwardsBothWays() {
+        let terminal = Terminal(delegate: Sink())
+        #expect(!terminal.isUserScrolling)
+        terminal.isUserScrolling = true
+        #expect(terminal.userScrolling)
+        terminal.userScrolling = false
+        #expect(!terminal.isUserScrolling)
+    }
 }
 #endif
