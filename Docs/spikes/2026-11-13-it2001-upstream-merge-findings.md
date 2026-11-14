@@ -476,3 +476,47 @@ in a closed list of user-input functions with reasons (`sendUserInputBytes`, `se
 `sendFocusReport()` call has the guard on the line before. So `respondsToQueries` is now read at
 those guard lines and in `sendQueryResponse`, not at one place only: this supersedes "read only at
 :959" in the delegate table above.
+
+## Whole-fork A/B after the sweep (X = `ad15bc0`, U = `d4f52faaa` + D9; builder #6, 2026-11-13)
+
+**Headless, 22 cases, both orders, 2 rounds, load 10-17** (`ab3/xu6`). 15 cases are inside their A/A
+floor by instructions, the six scrolling cases among them. Seven are above it in both orders, all
+small: osc_short_chunked +0.42/+0.43%, osc_bounded_over_limit +0.32/+0.33, osc_bounded_normal
++0.26/+0.27, sync_medium_cells +0.19/+0.20, ascii_seam_noop +0.11/+0.10, wide_seam_overwrite
++0.09/+0.09, dense_cells +0.07/+0.08 (floors 0.04-0.14). Against `baa70de`, osc_bounded, ascii,
+wide and dense are new. Back then X carried the lazy attribute table and U the fixed one, which
+likely hid them. Allocations, block_color_cells: X − U = 0..+2 calls in ~1.077 M, the same at 20
+and 60 iterations. That is setup-level, and settled.
+
+**Variants (scratch copies under the cache dir; the worktree was not touched):**
+
+| Variant | What | Result on the seven |
+|---|---|---|
+| Xb | X with U's ByteRunScanner.swift (D9's earlier `guard let` form) | worse: osc_bounded +0.5%; D9's form is not the cost |
+| XR | X minus the four replication files, Buffer/BufferLine/CharData = upstream's | 6 of 7 back inside the floor; osc_short_chunked stays +0.42/+0.42 |
+| UL | U plus one file of 250 public functions never called (__TEXT +246 KB; X is +147 KB over U, XR = U) | all 7 inside the floor |
+
+**What the variants show.** Adding inert code of the same size moves nothing, so the five-case cost
+is NOT layout or code size. It comes from what the replication code adds to the hot types. The
+fork's additions to Buffer, BufferLine and CharData are extensions and methods only, with no stored
+field. The open hypothesis: a type-level or optimiser effect, e.g. new cold call sites changing the
+optimiser's inlining or specialisation of hot functions they share. It is not yet bisected (the
+lead asked to hear of it first).
+
+osc_short_chunked's +0.42% is independent of the replication code. It is a per-feed residual in the
+remaining fork code (#5 saw the same number at `baa70de`).
+
+**RenderBench, one round (X U U X; load 32.8, 28.8, 22.7, 25.0: indicative only).** Every
+non-scrolling case is inside run-to-run spread. Main-queue hops are about half in X where titles
+occur (medium_cells 9258/9378 against 18468/18048; sync_medium_cells 8382/8208 against
+16704/16548), which is D2 working.
+
+The scroll family is 0.9-2.7% slower in MB/s in X: scrolling_fullscreen 590/587 against 605/605,
+also in the low-load pair (587 against 605). Frame pacing does not differ: frames, ticks and renders
+are 569-600 for both, coalesced 0-2, idle 0, main hops 0. So any cost is in feed throughput under a
+view, not in drawing. Headless scrolling_fullscreen is inside its floor (+0.2/-0.2%), and it is
+not settled by one round.
+
+**RenderBench steals keyboard focus at every launch.** Tools/RenderBench main.swift:297-298 calls
+`window.makeKeyAndOrderFront(nil)` and `NSApp.activate(ignoringOtherApps: true)`; that is 4 times
+per round. Each further round needs Nash's yes.
