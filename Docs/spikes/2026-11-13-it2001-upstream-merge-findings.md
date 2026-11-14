@@ -77,6 +77,71 @@ owes three things:
 - one test that an attach during an open sequence shows a waiting state;
 - that the same attach blocks nothing and is served at the next ground.
 
+## Whole-fork headless A/B against upstream (macOS, instructions, 2026-11-13)
+
+The compared trees were:
+
+- **X**: the head.
+- **U**: upstream `d4f52faaa` plus D9.
+- **U2**: a second copy of U, for the A/A run.
+
+The tool is `SwiftTermProfile`, 22 cases, run in both orders with 2 rounds of 50 iterations. The
+A/A floor (U against U2) is below 0.1% of instructions in most cases, and 0.72% at most.
+
+**At `baa70de`, X was slower than the floor in 11 of 22 cases:**
+
+- every scrolling case: +9.6% to +10.1% of instructions, and cycles agree
+- unicode +1.6%, medium_cells +0.9% to +1.5%, sync_medium_cells +1.0%, ghostty_osc +0.5%,
+  hardening_osc_short_chunked +0.4%
+
+A bisect found the cause in one word. The fork had declared `public var userScrolling`, and upstream
+declares `var userScrolling`. Upstream reads it five times on the scroll path. A public stored
+property of an open class keeps a dynamic exclusivity check on every read.
+
+The bisect ruled out the other suspects:
+
+- The cost was already present in the merge commit `e768bfa77`.
+- It was not CellArena: X with upstream's CellStorage.swift still measured +10%.
+- It was not the replication code: with that code removed, X still measured +9.8%.
+
+**Fix (`4ce3952`, lead 14's ruling (a)).** The declaration is upstream's again, and Scape reads
+`public var isUserScrolling`, a forwarder. Afterwards, all six scrolling cases, unicode and
+medium_cells are within the floor:
+
+- scrolling +0.02/+0.00
+- scrolling_fullscreen −0.20/−0.16
+- unicode +0.07/+0.14
+
+**The shipped pin, `7ec59163a`, pays the same kind of cost today.** As shipped, against the same
+tree with only `public` removed, by instructions in the two orders:
+
+| case | instructions |
+|---|---|
+| scrolling | +5.43% / +5.46% |
+| scrolling_bottom_region | +6.33% / +6.33% |
+| scrolling_bottom_small_region | +5.90% / +5.90% |
+| scrolling_fullscreen | +4.63% / +4.23% |
+| scrolling_top_region | +6.40% / +5.84% |
+| scrolling_top_small_region | +5.92% / +5.88% |
+| unicode | +1.29% / +1.32% |
+
+**Allocations.** X against U, 3 runs each: the counts differ by 1 to 11 calls in about 1.08 M. These
+differences are at setup level, not per iteration.
+
+**CellArena (per cell).** No headless case reads attributes cell by cell, so a scratch driver did
+it. The driver is not in the repo. It fills a 200x60 grid with 1024 distinct attributes, then reads
+every cell's attribute through `getLine` and the subscript, 300 times. With setup subtracted:
+
+- **Read cost:** X costs +1.44% of instructions per cell read against U (1075.7 M against
+  1060.4 M for 3.59 M cells).
+- **Memory, measured:** `phys_footprint` of 50 terminals at 200x60 with 1000 lines of scrollback,
+  each fed 1200 coloured lines. X uses 2.240 MB per terminal and U 2.269 MB, a saving of about
+  29 KB per terminal.
+- **Memory, computed:** the 896 KB of upstream's table (from `9500a26`) is virtual allocation. Pages
+  that are never touched do not count toward the footprint.
+
+The trade-off between this read cost and this memory goes to Nash.
+
 ## Inventory: every file under Sources/SwiftTerm that differs from d4f52faaa (at 01c422a)
 
 This answers the lead's question. Each file gets one line with the most frequent path its fork code
