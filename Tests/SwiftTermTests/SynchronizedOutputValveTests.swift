@@ -64,6 +64,37 @@ final class SynchronizedOutputValveTests {
         terminal.feed(text: "\u{1b}[?2026l")
     }
 
+    // A late timer after a host expiry changes nothing. Upstream's
+    // `expireSynchronizedOutput()` cancels the terminal's own armed item
+    // (endSynchronizedOutput -> reconcile -> upstream's `guard active else`
+    // cancel); a callback already past that cancel is stopped by
+    // `synchronizedOutputWatchdogFired`'s active and generation checks: in the
+    // closed window (not active) and in a later window (another generation).
+    @Test func aLateTimerAfterAHostExpiryChangesNothing() {
+        let recorder = Recorder()
+        let terminal = Terminal(delegate: recorder)
+        terminal.synchronizedOutputTimeout = 60
+        terminal.feed(text: Self.open)
+        #expect(terminal.synchronizedOutputWatchdogCounters.armed == 1)
+        let g = terminal.synchronizedOutputGeneration
+
+        terminal.expireSynchronizedOutput()
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(terminal.synchronizedOutputWatchdogCounters.cancelled == 1)
+
+        terminal.synchronizedOutputWatchdogFired(generation: g)
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(terminal.synchronizedOutputWatchdogCounters.fired == 0)
+
+        terminal.feed(text: Self.open)
+        #expect(terminal.synchronizedOutputGeneration != g)
+        terminal.synchronizedOutputWatchdogFired(generation: g)
+        #expect(terminal.synchronizedOutputActive, "the old generation must not end a later window")
+        #expect(terminal.synchronizedOutputWatchdogCounters.fired == 0)
+        #expect(recorder.changes == [true, false, true])
+        terminal.feed(text: "\u{1b}[?2026l")
+    }
+
     /// Setting a value while a window is open re-arms (P1 decision 2).
     @Test func aPlainTerminalReArmsWhenAValueIsSetInAnOpenWindow() {
         let terminal = Terminal(delegate: Recorder())
