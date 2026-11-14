@@ -77,6 +77,46 @@ owes three things:
 - one test that an attach during an open sequence shows a waiting state;
 - that the same attach blocks nothing and is served at the next ground.
 
+## Inventory: every file under Sources/SwiftTerm that differs from d4f52faaa (at 01c422a)
+
+This answers the lead's question. Each file gets one line with the most frequent path its fork code
+sits on: **per byte**, **per cell**, **per frame**, **per event** (per reply, per post, per user
+action, per resize), or **cold** (export or import, setup, API surface, compiled-out code).
+`EscapeSequenceParser.swift` is not on the list: it is upstream's, byte for byte.
+
+| File (+/-) | Path | What the fork does there |
+|---|---|---|
+| CellStorage.swift (+60/-8) | **per cell** | `9500a26` (IT-1016) grows the attribute table lazily. It starts at 256 slots and doubles. `attribute(for:)` gains a bounds guard (`index < attributeSlots`, returning the default attribute) and reads through a `var` pointer that was a `let`. Interning checks for growth. Retired tables are kept until the arena deinits. This is on render reads and on attribute reads during writes |
+| ByteRunScanner.swift (+12/-3) | per print or OSC run (not per byte) | D9 `5e72f28`: `guard let baseAddress` in the three Swift < 6.4 vector scans. This fixes upstream's crash on an empty span (Linux L0). On a Swift 6.4 toolchain the other branch is compiled |
+| Terminal.swift (+354/-33) | per event; per feed (O(1)) | `sendQueryResponse` gates replies on `respondsToQueries` (a `cold` read), per reply. `sendUserInputBytes` sends user input. The D7 watchdog: a pure decision function in `reconcileSynchronizedOutputWatchdog` (per outermost feed, as upstream) and the `synchronizedOutputTimeout` setter. `hasPendingSequence`. `public userScrolling`. `cold.respondsToQueries` and `cold.synchronizedOutputTimeoutDisabled`. The rest is `replication*` accessors (cold) |
+| Apple/TerminalEventQueue.swift (+12/-2) | per event post | `post(_:caller:)` takes a `StaticString` and, under the existing lock, counts `scheduledHops` and checks `ProfilingStats.enabled` (D2 diagnostics) |
+| Apple/AppleTerminalView.swift (+27/-4) | per frame (one optional) | D2: `pendingTitle` is read and cleared in `applyPendingViewUpdates` under the existing lock. This replaced a main-thread hop per title. Also `public` grants, a `resizeSuspended` check per resize, and `coalescedMainHops` diagnostics |
+| Mac/MacTerminalView.swift (+50/-19) | per event | `resizeSuspended` per resize. The selection autoscroll does its hit test and extension inside one terminal lock, per autoscroll tick, only while dragging. `scrollWheel` is `open`, and on the alternate screen the wheel always sends cursor keys (a behaviour choice, not a cost). Titles go through `crossThreadState` (D2). Also `public` grants and the view-level `userScrolling` |
+| iOS/iOSTerminalView.swift (+5/-5) | per event | the title goes through `crossThreadState` (D2) |
+| Mac/MacLocalTerminalView.swift (+18/-2) | per resize | D6: `windowSizeShouldBeSent` (0x0 and 1x1 send nothing) |
+| Apple/FrameDriver.swift (+7) | cold | `takePendingDirtyForTesting` (tests) |
+| Apple/SynchronizedOutputWatchdog.swift (+7) | cold | `armedGeneration` read for the D7 pins |
+| HeadlessTerminal.swift (+11) | per feed (one optional call) | `onOutput?(slice)` under the lock after each fed batch (the daemon's observer) |
+| KittyClipboardProtocol.swift (+2/-2) | per event | paste uses `sendUserInputBytes`; replies use `sendQueryResponse` (D8) |
+| Pty.swift (+50/-1) | per process launch | the child closes fds 3 up to max(getdtablesize(), 10240) before exec, so leaked descriptors are not inherited |
+| SearchEngine.swift, SearchService.swift (+13/-12) | cold | `public` grants; `findAll`'s default limit is spelled 1000 |
+| CharData.swift (+37) | per call (host) | `getText(maxUTF8Bytes:)`: a bounded text read for the host. SwiftTerm itself does not call it |
+| Buffer.swift (+64), BufferLine.swift (+49) | cold | `replication*` accessors and constructors, used at export and import |
+| TerminalStateSnapshot.swift (+605), TerminalStateSnapshotCoding.swift (+720), TerminalHistoryStreaming.swift (+202), TerminalReplicationDigest.swift (+232) | cold | export, import, the codec, history chunks, and the test digest. Nothing runs during a feed |
+
+**What needed the lazy attribute table (CellArena).** Commit `9500a26` (IT-1016, 2026-09-23),
+"perf(CellArena): IT-1016 grow the attribute table lazily". Its stated case is memory. Every
+CellArena allocated its full 65,536-slot attribute table (896 KB) up front: one per terminal, plus
+one per render snapshot. Scape's production heap held 176 of them (about 160 MB), and almost none
+were touched. Live arenas now start at 256 slots and double. Snapshot arenas copy the source's
+slot count and never grow. An outgrown table is retired, not freed, because a `PackedCellView`
+holds the arena `unowned(unsafe)`.
+
+No feature depends on it. It is a memory optimisation for Scape's many terminals and render
+snapshots. If it measures above the floor on the per-cell path, the alternative is upstream's
+fixed table, which brings back about 896 KB per arena. The case to make for keeping it is that
+memory figure, and the decision belongs to Nash.
+
 ## Assertion audit (plan section 8, last row)
 
 The check: every assertion line in a test file at the base (`7ec59163a`) that is missing at the
