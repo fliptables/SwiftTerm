@@ -520,3 +520,100 @@ not settled by one round.
 **RenderBench steals keyboard focus at every launch.** Tools/RenderBench main.swift:297-298 calls
 `window.makeKeyAndOrderFront(nil)` and `NSApp.activate(ignoringOtherApps: true)`; that is 4 times
 per round. Each further round needs Nash's yes.
+
+## The five small cases are launch; osc_short_chunked was the D7 gate (builder #7, 2026-11-13)
+
+**The five-case cost (osc_bounded ×2, sync_medium, ascii_seam, wide_seam, dense) is a fixed
+per-process launch cost, not a hot-path cost.** X − U is +2.4 to +7.2 M instructions in 20 of the
+22 cases of `ab3/xu6`, whatever the case's size (1.2 G to 118 G instructions). The five cases above
+the floor are just the smallest, so the same ~5 M shows as a larger percentage. Two facts prove it
+(`ab3/fixed2-results.tsv`, X/XR/U interleaved, 3 reps):
+
+- **No arguments** (process launch plus usage(), which builds the workload list and never makes a
+  Terminal): X − U = **+4.04 M** (U's spread 0.77 M); XR − U = −1.3 M.
+- **The delta does not grow with work.** light_cells at 1, 50 and 200 iterations: +3.2, +4.5 and
+  +3.2 M. osc_bounded_normal: +4.1, +4.7 and +3.2 M. dense_cells: +5.8, +4.6 and −4.3 M.
+
+The code agrees. Function by function (otool -tV, addresses normalised), X and XR differ in 47 of
+10,319 functions, all cold (view and renderer init, Kitty clipboard, sort helpers). Every parser,
+Buffer and BufferLine function is the same, and swift_beginAccess call sites are 1790 in both. No
+coroutine accessor, second caller or conformance changed any hot function's code. The ~4 M
+instructions (~1 ms, once per process) are launch work for the replication types (their metadata
+and conformance records), so they are accepted as launch (lead 14).
+
+**THE METHOD, corrected for every A/B in this ticket:** judge by the slope between two iteration
+counts, or subtract the no-argument launch delta. A difference that does not grow with work is
+launch, reported once as launch. Script: `ab2-tools/run-slope.sh` + `sum_slope.py`. The old outputs
+are kept.
+
+**osc_short_chunked's +0.42% was the D7 gate: 7.0 instructions per feed call.** One iteration is
+1,048,580 one-byte feeds; 52 iterations (with warmup) is 54.5 M feeds; (389 − 5 M launch) / 54.5 M
+= 7.0. In release, the gate's inline second apply call made `reconcileSynchronizedOutputWatchdog()`
+too big to inline into parse's `defer`. It became a tail-called function that built a stack frame
+before testing the dirty flag, and `feed(byteArray:)` stopped being merged with `parse`.
+
+Fix (`25d06b6`, red `f9dfcfb`): the gate stays after upstream's dirty exit and before upstream's
+apply call, in the one caller of apply. Its body is one call to the `@inline(never)` helper
+`reconcileDisabledSynchronizedOutputWatchdog()`.
+
+The not-dirty path of a one-byte feed, counted from `Tools/feed-path-disasm.py`'s listing of a
+release SwiftTermProfile (it needs a release binary, so it is a script plus these numbers, not a
+test):
+
+| build | instructions | calls out of parse on the path |
+|---|---|---|
+| U (`d4f52faaa` + D9) | 47 | swift_retain, EscapeSequenceParser.parseBorrowed, swift_release, merged `$defer` (reconcile inlined) |
+| `ad15bc0` | 54 | the same, then a tail call to reconcileSynchronizedOutputWatchdog (own frame); feed(byteArray:) → parse(buffer:) unmerged |
+| `25d06b6` | 47 | the same as U; feed(byteArray:) merged with parse again |
+
+No call out of parse on the not-dirty path that upstream's does not have. Instructions vs U, both
+orders, 2 rounds (`ab3/v1bu7-summary.txt`):
+
+| case | `25d06b6` | gate deleted (reference only) |
+|---|---|---|
+| osc_short_chunked | −0.014 / −0.003% | +0.010 / +0.006% |
+| osc_bounded_chunked | −0.125 / +0.015% | |
+| osc_short_normal | +0.011 / +0.011% | |
+| scrolling | +0.017 / +0.031% | |
+
+All are inside the A/A floor.
+
+**Per feed under a view (reading, `25d06b6`).** TerminalRenderOwner.swift has no fork lines; its
+feed transaction is upstream's. The fork code reached per feed call is the D7 gate (above, now
+upstream's instruction count) and nothing else. ViewTerminal's only fork line is a blank. There is
+no added lock per feed and no title work per feed (the title is recorded only on OSC 0/2).
+
+Per frame: `applyPendingViewUpdates` carries one more `String?` in the tuple, under the lock
+upstream already takes, and one `if let`. Per event only: TerminalEventQueue's `scheduledHops`
+counter, `resizeSuspended`, the gated reply guards, and the autoscroll lock. Headless only (the
+daemon): `onOutput?(slice)` per batch.
+
+The round-1 RenderBench binaries compared function by function: `preparePlainRow` differs only in
+scheduling and one merged thunk (X is 4 instructions smaller). `feedTransaction` differs only by the
+parse call. No other per-feed or per-frame function differs.
+
+**RenderBench, no focus (`--metal --no-activate --vtebench all --samples N`; 8 launches RX RU RU RX at
+N = 60 and 240; load 15.7-21.3; the frontmost app was unchanged in all 8).** RX = `25d06b6` Sources,
+RU = `d4f52faaa` + D9, each with the same tool edit. Instructions per sample are the slope
+(I240 - I60) / 180 of the tool's per-case counter (proc_pid_rusage ri_instructions over the measured
+feeds, the render thread included). RX - RU %, slot pair 1v2 / pair 4v3, then RU's own A/A (s2 v s3):
+
+| case | 1v2 | 4v3 | RU A/A |
+|---|---|---|---|
+| scrolling | -0.029 | -0.085 | -0.068 |
+| scrolling_bottom_region | -0.021 | -0.056 | -0.025 |
+| scrolling_bottom_small_region | +0.010 | -0.021 | -0.018 |
+| scrolling_fullscreen | -0.182 | -0.121 | -0.012 |
+| scrolling_top_region | -0.043 | +0.037 | -0.016 |
+| scrolling_top_small_region | -0.032 | +0.038 | +0.035 |
+| medium_cells | -0.049 | -0.234 | +0.021 |
+| unicode | +0.087 | -0.137 | +0.108 |
+| cursor_motion | -0.048 | -0.098 | -0.003 |
+| light_cells | -0.067 | -0.539 | -0.427 |
+| sync_medium_cells | +0.063 | -0.150 | -0.237 |
+| dense_cells | +0.117 | +0.101 | -0.016 |
+
+The scroll family is equal, or X is cheaper, so round 1's -0.9 to -2.7% MB/s (wall clock, load 23-33,
+focus taken) is closed as noise. dense_cells is above in both orders (+0.12/+0.10%), but X drew more
+frames per sample in both pairs (0.300 against 0.294), and frames follow wall time at 60 Hz. Its
+render instructions are inside the number. Headless dense_cells is launch only. One round.
