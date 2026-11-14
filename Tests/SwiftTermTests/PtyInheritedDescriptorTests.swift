@@ -137,6 +137,21 @@ struct PtyInheritedDescriptorTests {
         var limit = rlimit()
         try #require(getrlimit(Self.nofile, &limit) == 0)
         let original = limit
+        // Process-wide state in a runner that runs other suites in parallel: restored on
+        // EVERY exit path (this defer precedes the first change; it runs after the fds
+        // close). `.serialized` orders this suite only; swift-testing gives no exclusivity
+        // across suites. It cannot disturb them: the soft limit is only RAISED (toward the
+        // hard limit) except for the span of one fork, when it is 10240; a parallel open()
+        // fails with EMFILE then only if this runner already holds > 10,200 descriptors
+        // (fds are allocated lowest-first). A parallel fork in that span inherits fd 20000
+        // (a pipe write end whose read end is already closed: nothing waits on it) and fd
+        // 200 likewise. Nothing here touches fds 0-2 of this process or the pty's fds
+        // except reading and closing the master this fork returned; fd 0 is probed only
+        // inside the child's shell.
+        defer {
+            var restore = original
+            _ = setrlimit(Self.nofile, &restore)
+        }
         guard limit.rlim_max > rlim_t(Self.highDescriptor) else {
             print("IT-2001 Pty close path: untestable, RLIMIT_NOFILE hard limit \(limit.rlim_max) <= \(Self.highDescriptor)")
             return
@@ -158,7 +173,7 @@ struct PtyInheritedDescriptorTests {
         let forked = PseudoTerminalHelpers.fork(
             andExec: "/bin/sh", args: ["sh", "-c", Self.probe([("tty", 0), ("low", low), ("high", high)])],
             env: ["PATH=/usr/bin:/bin"], desiredWindowSize: &size)
-        var restore = original
+        var restore = original // at once, not at the defer: the lowered span is one fork
         #expect(setrlimit(Self.nofile, &restore) == 0)
         let (pid, master) = try #require(forked, "fork(andExec:) failed")
         let result = Self.collect(pid: pid, master: master)

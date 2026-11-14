@@ -17,6 +17,20 @@ import Foundation
  * `setWinSize` and `availableBytes`
  */
 public class PseudoTerminalHelpers {
+#if os(Linux)
+    /// IT-2001: glibc's close_range(unsigned first, unsigned last, int flags)
+    /// (glibc >= 2.34). Swift cannot call the variadic syscall(), and the Glibc
+    /// module does not declare close_range (it is under _GNU_SOURCE), so it is
+    /// resolved with dlsym, once, in the parent (dlsym is not async-signal-safe).
+    /// nil (older glibc, musl) = the child runs its close loop.
+    typealias CloseRangeFunction = @convention(c) (UInt32, UInt32, Int32) -> Int32
+    static let closeRangeFunction: CloseRangeFunction? = {
+        guard let handle = dlopen(nil, RTLD_NOW), let symbol = dlsym(handle, "close_range") else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: CloseRangeFunction.self)
+    }()
+#endif
     private struct CStringArray {
         let base: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
         let count: Int
@@ -133,6 +147,10 @@ public class PseudoTerminalHelpers {
         // or SwiftTerm (grep-verified 2026-07-19); if one is ever added,
         // revisit this bound.
         let fdLimit = max(getdtablesize(), 10240)
+#if os(Linux)
+        // IT-2001: read in the PARENT, so the child touches no lazy static.
+        let closeRange = PseudoTerminalHelpers.closeRangeFunction
+#endif
 
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
@@ -178,6 +196,16 @@ public class PseudoTerminalHelpers {
             // If a deliberately-inherited fd is ever introduced (none exist
             // today), it must be allowlisted explicitly in this loop.
             var leakedFd: Int32 = 3
+#if os(Linux)
+            // IT-2001: close_range(3, ~0U, 0) closes the same fds in one system
+            // call (Linux CI, RLIMIT_NOFILE 65536: ~0.2 ms vs ~20 ms for the
+            // loop). A call through a pointer resolved before fork: async-signal-
+            // safe, allocates nothing. ANY non-zero return (ENOSYS, EINVAL, EPERM
+            // under seccomp) leaves leakedFd at 3 and the loop below runs.
+            if let closeRange, closeRange(3, UInt32.max, 0) == 0 {
+                leakedFd = fdLimit
+            }
+#endif
             while leakedFd < fdLimit {
                 close(leakedFd)
                 leakedFd += 1
