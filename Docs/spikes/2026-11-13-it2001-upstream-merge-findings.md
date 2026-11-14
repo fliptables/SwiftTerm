@@ -1044,7 +1044,8 @@ byte.
   joins (BufferLine.swift:996-1001). The 64 cap is replaced by the bytes left.
 
 **P3 limitation (host).** A host must keep scrollback <= `TerminalStateSnapshot.maximumScrollback`
-(2^24) and (scrollback + rows) x cols <= `maximumCells` (2^26). Past either, its snapshots fail to
+(2^24) and (scrollback + rows) x cols, plus the alternate screen's rows x cols, <= `maximumCells`
+(2^26; round 4, which counts capacity). Past either, its snapshots fail to
 decode (an error, never a crash). Export does not refuse them.
 
 **Flag-only (no change):**
@@ -1065,3 +1066,52 @@ decode (an error, never a crash). Export does not refuse them.
 **Feed path at the fix** (`87692c1`, release SwiftTermProfile, `Tools/feed-path-disasm.py`): every section is the same as at `bfdcfc2` (`it2001-b/b10-disasm.log`), so the not-dirty one-byte path is still **47 = 47**. The only difference from U is the known D7 `$defer` (37 vs 43, the dirty-feed gate).
 
 **After the reader's P1** (fix on top of `91bd2f8`): macOS 2167 tests in 208 suites, 10 issues, all timing tests under load. Each is green alone 3/3: endCallback (3), SyncOutput background (2), theDefaultOutlastsAShortSilence (2), shorteningTheTimeout (1) (`b10-alone.txt`), plus two NEW to the load-bound list (`b10-alone2.txt`): `MetalRendererConcurrencyTests.cursorBlinkControllerOwnsTimerOnMainActor` (`:46:9: Expectation failed: redraws.withLock { $0 } > 0`) and `TerminalIOPipelineTests.interactiveTrickleIsDeliveredImmediately` (`:403:9: Expectation failed: pipeline.coalescingNaps == 0`). XCTest 150/150. CENSUS 105/57/48. The only Sources file changed is TerminalStateSnapshotCoding.swift (decode), so the feed-path disassembly was not re-run: it is the same as at `87692c1`.
+
+**Round 4 (the reader on `d1118ea..ee195b1`).** This replaces round 3's cell formula and its "lines held" row.
+- **The cap counts CAPACITY.** For each buffer, take W = max(buffer cols, modes cols) and add
+  max(Σ max(line cols, W), lineCapacity × W), using overflow-reporting forms.
+  - Why: a hidden normal buffer is widened to the modes' cols when it is shown again (CSI ? 1049 l →
+    resizeNormalBufferToCurrentGridIfNeeded, Terminal.swift:1449/:1488-1493 → Buffer.resize widens
+    every held line, Buffer.swift:998-1006), and every buffer can fill to lineCapacity lines of W as
+    output scrolls.
+  - lineCapacity >= rows, so this covers round 3's grid term.
+  - Honest refusal is exactly the documented host limit, (scrollback + rows) × cols, plus the alt
+    buffer's rows × cols.
+  - Reds: a hidden normal of 1 col × 80000 lines under a 65535-col grid (~42 GB at the next 1049 l);
+    a screen part with 1 line, capacity 2^24 and 65535 cols.
+- **History streams only for a buffer with scrollback.**
+  - Export: the screen part skips history, and exportForStreaming copies it, only where
+    `hasScrollback`. The alt buffer never has scrollback (Terminal.swift:1298-1301), so its few
+    lines above yBase now go WHOLE in the screen part. Before, an alt grown by a resize sent 6 of
+    its 14 lines as chunks.
+  - Chunk decode: refuses an alt chunk, and every line must have cols == bufferCols. A buffer with
+    scrollback reflows, and both resize paths set every line to the new cols.
+  - importHistoryChunk: returns false for a buffer without scrollback, and builds only the lines it
+    keeps. Before, it built the whole chunk and then trimmed.
+  - Snapshot validate: alt.scrollback == nil; pendingHistoryLines > 0 only where scrollback != nil.
+- **validate accepts what import produces.** Round 3's "lines.count + pendingHistoryLines >= rows"
+  is replaced by lines.count >= 1 (normal always; alt when active), and the inactive alt may still
+  hold 0 lines. Reason: import never reads pendingHistoryLines (makeBuffer builds from image.lines
+  only), so the pending term protected nothing. A replica holding its screen part without its
+  chunks re-exports a buffer with fewer lines than rows; that export must, and now does, decode
+  (asserted in survives()).
+
+**The closing criterion** (the reader, via Lloyd): "The bytes travel between two processes of the
+same build on one machine. A corrupted or truncated stream must FAIL (decode throws, or
+importHistoryChunk returns false), never crash. After import, on any later input, the importer
+allocates no more than an honest owner in the same state allocates on that input. That owner
+allocation must ALSO be either counted by validate's cell sum or bounded by a small constant factor
+(≤ ~100×) of the wire bytes that actually carried the lines. A case meeting both is RECORDED, not
+fixed."
+
+**Sweep: what can allocate after import from decoded numbers**
+
+| # | Operation | Allocates | Status |
+|---|---|---|---|
+| 1 | CSI ? 1049 h / l | 1049 h fills the alt to rows × cols (fillViewportRows, Buffer.swift:971-972); the alt grid == the modes' grid. 1049 l widens the hidden normal's held lines and grid to the modes' grid | COUNTED: lineCapacity × W and Σ max(line cols, W) for each buffer |
+| 2 | A resize to a larger grid | the host's resize is owner-driven, not from bytes. DECCOLM IS from bytes: CSI ? 40 h then CSI ? 3 h resizes to 132 cols (Terminal.swift:7103-7106, :7399), and the widen loop sets every held line to 132 | RECORDED (ruling A): the owner does the same on the same bytes. At most 132/cols per line, and a line costs >= 11 bytes on the wire, so ≤ ~96× the wire bytes |
+| 3 | Reflow of lines wider than the buffer | Wider lines exist only where reflow is off (no scrollback: the alt, capacity = rows). Any resize sets every line to exactly the new cols (BufferLine.resize; the widen loop, Buffer.swift:998-1006; the narrow path, :1082-1089). Reflow (Buffer.swift:1769) re-wraps the content that is already held | COUNTED: Σ max(line cols, W) includes each wide line at its own width, and a re-wrap does not add content |
+| 4 | History chunks after the screen part | each kept line at bufferCols | BOUNDED: only the normal buffer streams; every line == bufferCols == the replica's cols (checked at import); only kept lines are built; the retained total ≤ lineCapacity lines × cols, which the snapshot's lineCapacity × W term counted |
+| 5 | Tab stops, saved cursor, kitty and title stacks after import | tab stops grow to the new cols at a resize (Buffer.swift:1075-1080), one Bool per column. The saved cursor holds no storage. Kitty pushes are capped at 16 (Terminal.swift:1646). Title pushes copy the stack (Terminal.swift:5791-5792) | RECORDED: tab stops ≤ cols (covered by #2); a title push is O(stack), and the stack was carried at ≥ 1 wire byte per entry |
+
+**macOS suite at round 4** (2170 tests in 208 suites; load average 80-180 on 10 cores): 11 issues, all timing bounds: endCallback (3), SyncOutput background (6), theDefaultOutlastsAShortSilence (1), and `KittyClipboardProtocolTests.aFragmentedWriteDoesNotRecopyItsAccumulatedData` (1, NEW; `:1111:9: Expectation failed: elapsed < 20`, elapsed 33.4 s). Run alone under the same load, the first three are 3/3. The Kitty test passed 1 of 3 (21.4 s, 21.6 s, then 19.4 s against its 20 s bound). It reads none of the changed code (the snapshot codec, history streaming, export, one Buffer accessor). XCTest 150/150. CENSUS 105/57/48. UpstreamOnlyAdds, coverage, streaming and size/time are green (`run-b10-fix10.log`). The feed-path files are unchanged since `87692c1`: the changed Sources are TerminalStateSnapshotCoding, TerminalHistoryStreaming, TerminalStateSnapshot (export) and one computed accessor in Buffer.swift's replication block.

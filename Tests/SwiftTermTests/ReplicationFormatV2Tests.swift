@@ -228,8 +228,9 @@ final class ReplicationFormatV2Tests {
         // buffer (observed: the hidden normal buffer under the alternate screen keeps its grid).
         try Self.refuses("active rows != modes rows") { $0.normal.rows = 9 }
         try Self.refuses("zero rows on the hidden buffer") { $0.alt.rows = 0 }
-        // An alternate buffer never activated exports 0 lines (observed): 0 is allowed, 1..<rows is not.
-        try Self.refuses("fewer lines than rows") { $0.normal.lines = Array($0.normal.lines.prefix(7)); $0.normal.yBase = 0; $0.normal.yDisp = 0 }
+        // An inactive alternate buffer may hold 0 lines (observed: never activated). Fewer lines
+        // than rows is accepted (round 4 ruling: validate accepts what import produces, and a
+        // replica holding its screen part before its chunks is in that state); no lines is not.
         try Self.refuses("no lines on the active buffer") { $0.normal.lines = []; $0.normal.yBase = 0; $0.normal.yDisp = 0 }
         // A line WIDER than the buffer is honest (a resize without reflow keeps it: observed);
         // a narrower one trips Buffer.resize's post-condition (fatalError).

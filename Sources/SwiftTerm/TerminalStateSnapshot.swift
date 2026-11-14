@@ -41,8 +41,8 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
     /// (one constant for both). A decoder refuses any other, version 1 included.
     public static let formatVersion: UInt32 = 2
     /// Decode's memory bounds. A host must keep scrollback ≤ `maximumScrollback` and
-    /// (scrollback + rows) × cols ≤ `maximumCells`; beyond either, its snapshots fail to
-    /// decode (an error, never a crash).
+    /// (scrollback + rows) × cols, plus the alternate screen's rows × cols, ≤ `maximumCells`;
+    /// beyond either, its snapshots fail to decode (an error, never a crash).
     public static let maximumScrollback = 1 << 24
     /// See ``maximumScrollback``: the cells of both buffers' lines together (8 bytes each).
     public static let maximumCells = 1 << 26
@@ -378,7 +378,10 @@ extension Terminal {
     }
 
     static func bufferImage(_ buffer: Buffer, dropped: inout Int, skippingHistory: Bool = false) -> BufferImage {
-        let history = skippingHistory ? min(buffer.replicationYBase, buffer.replicationLines.count) : 0
+        // History streams only for a buffer with scrollback; the alternate buffer's few lines
+        // above yBase go whole in the screen part.
+        let history = skippingHistory && buffer.replicationHasScrollback
+            ? min(buffer.replicationYBase, buffer.replicationLines.count) : 0
         var lines: [LineImage] = []
         lines.reserveCapacity(buffer.replicationLines.count - history)
         for index in history..<buffer.replicationLines.count {

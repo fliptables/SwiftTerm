@@ -2137,6 +2137,7 @@ extension Buffer {
     var replicationCols: Int { cols }
     var replicationRows: Int { rows }
     var replicationScrollback: Int? { scrollback }
+    var replicationHasScrollback: Bool { hasScrollback }
     var replicationDefaultBidiState: BidiPresentationState { defaultBidiState }
     func replicationAbsoluteRow(of line: BufferLine) -> Int? { absoluteRow(of: line) }
 

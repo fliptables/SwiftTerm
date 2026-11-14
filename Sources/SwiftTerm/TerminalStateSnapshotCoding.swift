@@ -183,12 +183,16 @@ extension TerminalStateSnapshot {
             try check((buffer.scrollback ?? 0) <= TerminalStateSnapshot.maximumScrollback, "\(name) scrollback")
             try check(buffer.lineCapacity >= rows && buffer.lineCapacity <= (buffer.scrollback ?? 0) + 65535
                       && buffer.lineCapacity >= buffer.lines.count, "\(name) line capacity")
-            // An alternate buffer never activated exports no lines (observed); a normal buffer is
-            // never empty. A screen part leaves out the lines above yBase, which upstream can hold
-            // past lines.count - rows (observed: an alternate buffer grown by a resize), so the
-            // grid is counted with the history still to come.
-            let held = buffer.lines.count + buffer.pendingHistoryLines
-            try check(held >= rows || (held == 0 && isAlt && !active), "\(name) lines")
+            // The alternate buffer never has scrollback (Terminal setup), so only the normal
+            // buffer streams history.
+            try check(!isAlt || buffer.scrollback == nil, "\(name) scrollback")
+            try check(buffer.pendingHistoryLines == 0 || buffer.scrollback != nil, "\(name) pending history")
+            // validate accepts what import produces: a replica that has its screen part but not
+            // yet its chunks holds fewer lines than rows (import builds from the lines only, never
+            // from pendingHistoryLines), and survives feeds and resizes so (aScreenPart... test).
+            // An alternate buffer never activated exports no lines (observed); a normal buffer,
+            // or an active alternate one, is never empty.
+            try check(!buffer.lines.isEmpty || (isAlt && !active), "\(name) lines")
             // A resize without reflow leaves lines wider than the grid; a narrower one trips
             // Buffer.resize's post-condition (fatalError) at the next resize.
             try check(buffer.lines.allSatisfy { $0.cols >= cols }, "\(name) line width")
@@ -213,20 +217,23 @@ extension TerminalStateSnapshot {
             // is added to (Terminal.swift:8761, :8893, importHistoryChunk) and to row offsets
             // (TerminalContentSnapshot.swift:565-576), so it stays far from Int.max.
             try check(buffer.linesTop >= 0 && buffer.linesTop <= 1 << 62, "\(name) linesTop")
-            // Import allocates each line's own width in cells, and the grid is filled to rows x
-            // cols later even when fewer lines are held: at the next activation
-            // (fillViewportRows) or lazily, row by row. So a buffer counts the larger of the two.
-            // Line widths are <= 65535 and the line count is bounded by the input bytes, so the
-            // sums cannot overflow, but say so.
+            // What the imported buffer can come to hold with no further input from the stream:
+            // every held line widened to at least W = max(cols, modes cols) (a hidden normal
+            // buffer is resized to the modes' grid when shown again, and Buffer.resize widens
+            // every line), and lineCapacity lines of W as output scrolls or the grid is filled
+            // (fillViewportRows at activation). lineCapacity >= rows, so this covers the grid.
+            // Widths are <= 65535 and the line count is bounded by the input bytes, but the
+            // sums use overflow-reporting forms anyway.
+            let widest = max(cols, modes.cols)
             var heldCells = 0
             for line in buffer.lines {
-                let (sum, overflow) = heldCells.addingReportingOverflow(line.cols)
+                let (sum, overflow) = heldCells.addingReportingOverflow(max(line.cols, widest))
                 try check(!overflow && sum <= TerminalStateSnapshot.maximumCells, "cells")
                 heldCells = sum
             }
-            let (grid, gridOverflow) = rows.multipliedReportingOverflow(by: cols)
-            let (sum, overflow) = cells.addingReportingOverflow(max(heldCells, grid))
-            try check(!gridOverflow && !overflow && sum <= TerminalStateSnapshot.maximumCells, "cells")
+            let (filled, filledOverflow) = buffer.lineCapacity.multipliedReportingOverflow(by: widest)
+            let (sum, overflow) = cells.addingReportingOverflow(max(heldCells, filledOverflow ? Int.max : filled))
+            try check(!filledOverflow && !overflow && sum <= TerminalStateSnapshot.maximumCells, "cells")
             cells = sum
         }
     }

@@ -101,7 +101,8 @@ extension Terminal {
         var history: [(isAlternate: Bool, cols: Int, rows: Int, lines: [BufferLine], promptRow: Int?)] = []
         for (isAlternate, buffer) in [(false, replicationNormalBuffer), (true, replicationAltBuffer)] {
             let count = min(buffer.replicationYBase, buffer.replicationLines.count)
-            guard count > 0 else { continue }
+            // The same rule as the screen part: only a buffer with scrollback streams history.
+            guard count > 0, buffer.replicationHasScrollback else { continue }
             var copies: [BufferLine] = []
             copies.reserveCapacity(count)
             for index in 0..<count { copies.append(buffer.replicationLines[index].replicationCopy(arena: arena)) }
@@ -122,21 +123,23 @@ extension Terminal {
     @discardableResult
     public func importHistoryChunk(_ chunk: TerminalHistoryChunk) -> Bool {
         let buffer = chunk.isAlternateBuffer ? replicationAltBuffer : replicationNormalBuffer
-        guard buffer.replicationCols == chunk.bufferCols, buffer.replicationRows == chunk.bufferRows else { return false }
-        var payloads: [String: TinyAtom] = [:]
-        let lines = chunk.lines.map { makeImportedLine($0, arena: buffer.replicationCellArena, payloads: &payloads) }
-        guard !lines.isEmpty else { return true }
+        guard buffer.replicationCols == chunk.bufferCols, buffer.replicationRows == chunk.bufferRows,
+              buffer.replicationHasScrollback else { return false }
+        guard !chunk.lines.isEmpty else { return true }
+        // Only the lines kept are built: the rest would be trimmed at once.
         let capacity = buffer.replicationLines.maxLength
-        let kept = max(0, min(lines.count, capacity - buffer.replicationLines.count))
-        let trimmed = lines.count - kept
+        let kept = max(0, min(chunk.lines.count, capacity - buffer.replicationLines.count))
+        let trimmed = chunk.lines.count - kept
+        var payloads: [String: TinyAtom] = [:]
+        let lines = chunk.lines[trimmed...].map { makeImportedLine($0, arena: buffer.replicationCellArena, payloads: &payloads) }
         if kept > 0 {
-            buffer.replicationLines.splice(start: 0, deleteCount: 0, items: Array(lines[trimmed...]), change: { _ in })
+            buffer.replicationLines.splice(start: 0, deleteCount: 0, items: lines, change: { _ in })
         }
         buffer.replicationLinesTop += trimmed
         buffer.replicationYBase += kept
         buffer.yDisp += kept
         if let row = chunk.semanticPromptStartRow, row >= trimmed {
-            buffer.replicationSemanticPromptStartLine = lines[row]
+            buffer.replicationSemanticPromptStartLine = lines[row - trimmed]
             buffer.replicationSemanticPromptStartRowCache = row - trimmed
         } else if buffer.replicationSemanticPromptStartLine != nil {
             buffer.replicationSemanticPromptStartRowCache += kept
@@ -201,16 +204,19 @@ extension TerminalHistoryChunk {
         try validate()
     }
 
-    /// The invariants the exporter guarantees: a chunk holds at least one line, none narrower
-    /// than the grid it was exported at (import checks that grid against the replica's own; a
-    /// resize without reflow leaves lines wider). The cells' own checks run in the line decode.
+    /// The invariants the exporter guarantees: a chunk is the normal buffer's (only a buffer with
+    /// scrollback streams history) and holds at least one line, each exactly as wide as the grid
+    /// it was exported at (a buffer with scrollback reflows, and the widen loop and the narrow
+    /// path resize every line to the new cols). Import checks that grid against the replica's
+    /// own. The cells' own checks run in the line decode.
     func validate() throws {
         func check(_ condition: Bool, _ what: String) throws {
             guard condition else { throw TerminalStateSnapshotError.invalid(what) }
         }
         try check(bufferCols > 0 && bufferRows > 0, "chunk grid")
+        try check(!isAlternateBuffer, "chunk buffer")
         try check(!lines.isEmpty, "chunk lines")
-        try check(lines.allSatisfy { $0.cols >= bufferCols }, "chunk line width")
+        try check(lines.allSatisfy { $0.cols == bufferCols }, "chunk line width")
         if let row = semanticPromptStartRow { try check(row < lines.count, "prompt row") }
         // Import allocates every line of the chunk at its own width before trimming any.
         var cells = 0
