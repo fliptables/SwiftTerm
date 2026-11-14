@@ -192,7 +192,8 @@ final class ReplicationFormatV2Tests {
     /// (b) A TAB reads tabStops[x] for every x < cols.
     @Test func decodeRefusesShortTabStops() throws {
         try Self.refuses("no tab stops") { $0.normal.tabStops = [] }
-        try Self.refuses("tab stops short by one") { $0.normal.tabStops.removeLast() }
+        // A fresh buffer holds cols + 1 stops (observed 31 at 30 cols), a resized one cols.
+        try Self.refuses("tab stops short by one") { $0.normal.tabStops = Array($0.normal.tabStops.prefix(29)) }
     }
 
     /// (c) Every cell scalar and grapheme scalar must be one the arena stores.
@@ -210,22 +211,36 @@ final class ReplicationFormatV2Tests {
     /// (d) Dimensions and positions import assigns unchecked.
     @Test func decodeRefusesAPositionOutsideTheGrid() throws {
         try Self.refuses("buffer cols != modes cols") { $0.normal.cols = 31 }
-        try Self.refuses("alt rows != modes rows") { $0.alt.rows = 7 }
+        // Only the ACTIVE buffer must match the modes' grid: a resize reaches only the active
+        // buffer (observed: the hidden normal buffer under the alternate screen keeps its grid).
+        try Self.refuses("active rows != modes rows") { $0.normal.rows = 9 }
+        try Self.refuses("zero rows on the hidden buffer") { $0.alt.rows = 0 }
         // An alternate buffer never activated exports 0 lines (observed): 0 is allowed, 1..<rows is not.
         try Self.refuses("fewer lines than rows") { $0.normal.lines = Array($0.normal.lines.prefix(7)); $0.normal.yBase = 0; $0.normal.yDisp = 0 }
-        try Self.refuses("a line wider than the buffer") { $0.normal.lines[0].cols = 31 }
+        try Self.refuses("no lines on the active buffer") { $0.normal.lines = []; $0.normal.yBase = 0; $0.normal.yDisp = 0 }
+        // A line WIDER than the buffer is honest (a resize without reflow keeps it: observed);
+        // a narrower one trips Buffer.resize's post-condition (fatalError).
+        try Self.refuses("a line narrower than the buffer") { $0.normal.lines[0].cols = 29 }
         try Self.refuses("x past cols") { $0.normal.x = 31 }
         try Self.refuses("savedX past cols") { $0.normal.savedX = 31 }
         try Self.refuses("y at rows") { $0.normal.y = 8 }
-        try Self.refuses("savedY at rows") { $0.normal.savedY = 8 }
-        try Self.refuses("negative savedY") { $0.normal.savedY = -1 }
+        // savedY outside 0..<rows is honest after a resize smaller (observed -3); restore clamps it.
+        try Self.refuses("linesTop near Int.max") { $0.normal.linesTop = Int.max }
+        try Self.refuses("mark column Int.min") {
+            $0.normal.lines[0].semanticMarks = [SemanticMark(kind: .initial, column: Int.min, group: 0)]
+        }
+        try Self.refuses("savedY Int.min") { $0.normal.savedY = Int.min }
+        try Self.refuses("savedY Int.max") { $0.normal.savedY = Int.max }
         try Self.refuses("scrollTop after scrollBottom") { $0.normal.scrollTop = 5; $0.normal.scrollBottom = 4 }
         try Self.refuses("scrollBottom at rows") { $0.normal.scrollBottom = 8 }
         try Self.refuses("marginLeft after marginRight") { $0.normal.marginLeft = 10; $0.normal.marginRight = 9 }
         try Self.refuses("marginRight at cols") { $0.normal.marginRight = 30 }
         try Self.refuses("negative marginLeft") { $0.normal.marginLeft = -1 }
-        try Self.refuses("yBase past the lines") { $0.normal.yBase = $0.normal.lines.count - 7 }
-        try Self.refuses("yDisp past the lines") { $0.normal.yDisp = $0.normal.lines.count - 7 }
+        // yBase past lines.count - rows is honest (observed on an alternate buffer grown by a
+        // resize); past lines.count it is not.
+        try Self.refuses("yBase past the lines") { $0.normal.yBase = $0.normal.lines.count + 1 }
+        try Self.refuses("yDisp past the lines") { $0.normal.yDisp = $0.normal.lines.count + 1 }
+        try Self.refuses("negative yDisp") { $0.normal.yDisp = -1 }
         try Self.refuses("negative linesTop") { $0.normal.linesTop = -1 }
         try Self.refuses("scrollback past upstream's clamp") { $0.normal.scrollback = Int(Int32.max) }
         try Self.refuses("line capacity below rows") { $0.normal.lineCapacity = 7 }
@@ -253,10 +268,189 @@ final class ReplicationFormatV2Tests {
             let owner = Self.make()
             setUp(owner)
             let snapshot = try #require(owner.exportState(), "\(name): no export")
-            #expect(throws: Never.self, "\(name)") { _ = try TerminalStateSnapshot(encoded: snapshot.encoded()) }
+            #expect(throws: Never.self, "\(name): \(Self.summary(snapshot))") { _ = try TerminalStateSnapshot(encoded: snapshot.encoded()) }
             let streaming = try #require(owner.exportForStreaming(), "\(name): no streaming export")
-            #expect(throws: Never.self, "\(name) (screen part)") { _ = try TerminalStateSnapshot(encoded: streaming.screen.encoded()) }
+            #expect(throws: Never.self, "\(name) (screen part): \(Self.summary(streaming.screen))") { _ = try TerminalStateSnapshot(encoded: streaming.screen.encoded()) }
+            for chunk in streaming.historyChunks(linesPerChunk: 7) {
+                #expect(throws: Never.self, "\(name) (chunk \(chunk.index))") { _ = try TerminalHistoryChunk(encoded: chunk.encoded()) }
+            }
         }
+    }
+
+    /// The fields validate() reads, for a failure message.
+    private static func summary(_ snapshot: TerminalStateSnapshot) -> String {
+        func one(_ b: BufferImage) -> String {
+            "\(b.cols)x\(b.rows) lines \(b.lines.count) widths \(Set(b.lines.map(\.cols)).sorted()) cap \(b.lineCapacity) "
+                + "x \(b.x) y \(b.y) saved \(b.savedX),\(b.savedY) yBase \(b.yBase) yDisp \(b.yDisp) "
+                + "region \(b.scrollTop)-\(b.scrollBottom) margins \(b.marginLeft)-\(b.marginRight) stops \(b.tabStops.count)"
+        }
+        return "grid \(snapshot.cols)x\(snapshot.rows) alt \(snapshot.alternateScreenActive) | normal \(one(snapshot.normal)) | alt \(one(snapshot.alt))"
+    }
+
+    /// Resize cuts in both directions on both buffers, each decoded whole and streamed.
+    @Test func resizeCutsStillDecode() throws {
+        let history = (0..<60).map { "line \($0) " + String(repeating: "w", count: $0 % 40) + "\r\n" }.joined()
+        let sizes = [(20, 5), (12, 4), (45, 14), (30, 8), (80, 3), (3, 20)]
+        for alternate in [false, true] {
+            for (cols, rows) in sizes {
+                let owner = Self.make()
+                owner.feed(text: history + "\u{1b}[3;6H\u{1b}7\u{1b}[2;7r")
+                if alternate { owner.feed(text: "\u{1b}[?1049h" + history + "\u{1b}[4;9H\u{1b}7") }
+                owner.resize(cols: cols, rows: rows)
+                owner.feed(text: "z")
+                let name = "\(alternate ? "alt" : "normal") \(cols)x\(rows)"
+                let snapshot = try #require(owner.exportState(), "\(name): no export")
+                #expect(throws: Never.self, "\(name): \(Self.summary(snapshot))") { _ = try TerminalStateSnapshot(encoded: snapshot.encoded()) }
+                let streaming = try #require(owner.exportForStreaming(), "\(name): no streaming export")
+                #expect(throws: Never.self, "\(name) (screen part): \(Self.summary(streaming.screen))") { _ = try TerminalStateSnapshot(encoded: streaming.screen.encoded()) }
+                for chunk in streaming.historyChunks(linesPerChunk: 9) {
+                    #expect(throws: Never.self, "\(name) (chunk \(chunk.index))") { _ = try TerminalHistoryChunk(encoded: chunk.encoded()) }
+                }
+            }
+        }
+    }
+
+    /// Over-tight byte bounds would refuse honest exports: wide lines (all written, all
+    /// blank in a colour, all wide) and a long scrollback still decode, whole and streamed.
+    @Test func wideLinesAndALongScrollbackStillDecode() throws {
+        let sink = Sink()
+        let owner = Terminal(delegate: sink, options: TerminalOptions(cols: 500, rows: 24, scrollback: 5000))
+        owner.synchronizedOutputTimeout = nil
+        owner.feed(text: String(repeating: "x", count: 500) + "\r\n")
+        owner.feed(text: "\u{1b}[44m" + String(repeating: " ", count: 500) + "\u{1b}[0m\r\n")
+        owner.feed(text: "\u{1b}[41m\u{1b}[K\u{1b}[0m\r\n")
+        owner.feed(text: String(repeating: "\u{4e00}", count: 250) + "\r\n")
+        owner.feed(text: (0..<6000).map { "history \($0) " + String(repeating: "h", count: $0 % 400) + "\r\n" }.joined())
+        owner.feed(text: String(repeating: "e\u{301}", count: 500))
+        let snapshot = try #require(owner.exportState())
+        #expect(snapshot.normal.lines.count == 5024)
+        #expect(try TerminalStateSnapshot(encoded: snapshot.encoded()) == snapshot)
+        let streaming = try #require(owner.exportForStreaming())
+        #expect(throws: Never.self) { _ = try TerminalStateSnapshot(encoded: streaming.screen.encoded()) }
+        for chunk in streaming.historyChunks() {
+            #expect(throws: Never.self, "chunk \(chunk.index)") { _ = try TerminalHistoryChunk(encoded: chunk.encoded()) }
+        }
+        withExtendedLifetime(sink) {}
+    }
+
+    /// Imports `snapshot` and drives every reader of the relaxed fields: DECRC on both buffers,
+    /// a scroll, resizes both ways (savedY arithmetic in resize and reflow), an alternate
+    /// screen round trip and an export. A trap here fails the whole run.
+    private static func survives(_ snapshot: TerminalStateSnapshot) throws {
+        let decoded = try TerminalStateSnapshot(encoded: snapshot.encoded())
+        let replica = make()
+        replica.importState(decoded)
+        replica.feed(text: "\u{1b}8x\r\n\u{1b}[2S\u{1b}[1T" + (0..<12).map { "after \($0)\r\n" }.joined())
+        replica.resize(cols: 20, rows: 5)
+        replica.feed(text: "\u{1b}8y\u{1b}[?1049h\u{1b}8z\u{1b}[?1049l\u{1b}8")
+        replica.resize(cols: 40, rows: 12)
+        replica.feed(text: "\u{1b}8w")
+        let again = try #require(replica.exportState())
+        _ = try TerminalStateSnapshot(encoded: again.encoded())
+    }
+
+    /// The relaxed savedY (no grid check) at its accepted extremes imports and survives.
+    @Test func aSavedRowAtTheAcceptedExtremesSurvives() throws {
+        for value in [Int(Int32.max), -Int(Int32.max), -3, 8, 1000] {
+            var snapshot = try Self.validSnapshot()
+            snapshot.normal.savedY = value
+            try Self.survives(snapshot)
+        }
+    }
+
+    /// The relaxed view (yBase, yDisp up to lines.count, past lines.count - rows) imports and survives.
+    @Test func aViewAtTheLinesHeldSurvives() throws {
+        var snapshot = try Self.validSnapshot()
+        snapshot.normal.yBase = snapshot.normal.lines.count
+        snapshot.normal.yDisp = snapshot.normal.lines.count
+        try Self.survives(snapshot)
+        var displayOnly = try Self.validSnapshot()
+        displayOnly.normal.yDisp = displayOnly.normal.lines.count
+        try Self.survives(displayOnly)
+    }
+
+    /// Upstream pushes titles without a cap (CSI 22 t), so decode bounds the stacks by the bytes left.
+    @Test func aTitleStackDeeperThan4096Decodes() throws {
+        let sink = Sink()  // Terminal holds its delegate weakly, and CSI 22 t goes through it.
+        let owner = Terminal(delegate: sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
+        owner.feed(text: String(repeating: "\u{1b}[22;0t", count: 4097))
+        let snapshot = try #require(owner.exportState())
+        #expect(snapshot.modes.terminalTitleStack.count == 4097)
+        let decoded = try TerminalStateSnapshot(encoded: snapshot.encoded())
+        #expect(decoded == snapshot)
+        withExtendedLifetime(sink) {}
+    }
+
+    /// A cell takes any number of combining marks, so decode bounds a grapheme by the bytes left.
+    @Test func aCellWithAHundredCombiningMarksDecodes() throws {
+        let owner = Self.make()
+        owner.feed(text: "e" + String(repeating: "\u{301}", count: 100))
+        let snapshot = try #require(owner.exportState())
+        let decoded = try TerminalStateSnapshot(encoded: snapshot.encoded())
+        #expect(decoded == snapshot)
+    }
+
+    /// A width state outside 0...3 makes import's arena.pack fail (a precondition trap).
+    @Test func decodeRefusesAnInvalidWidthState() throws {
+        try Self.refuses("width state 4") { $0.normal.lines[0].cells[0].widthState = 4 }
+    }
+
+    /// A small stream must not make import allocate cols x lines cells beyond the cap: a
+    /// 65535 x 65535 grid of near-empty lines is under 1 MB encoded and ~34 GB imported.
+    /// The check (maximumCells) runs in validate() at the end of init(encoded:), before import
+    /// allocates anything. Asserts on decode only (decode keeps written prefixes and bounds every
+    /// reserve by the bytes left, so it never allocates the grid); this test never imports.
+    @Test func decodeRefusesAGridPastTheCellCap() throws {
+        try Self.refuses("65535 x 65535") { snapshot in
+            let side = 65535
+            snapshot.modes.cols = side; snapshot.modes.rows = side
+            var blank = snapshot.normal.lines[snapshot.normal.lines.count - 1]
+            blank.cols = side; blank.cells = []
+            for alternate in [false, true] {
+                var buffer = alternate ? snapshot.alt : snapshot.normal
+                buffer.cols = side; buffer.rows = side
+                buffer.lines = alternate ? [] : Array(repeating: blank, count: side)
+                buffer.lineCapacity = side + (buffer.scrollback ?? 0)
+                buffer.yBase = 0; buffer.yDisp = 0; buffer.x = 0; buffer.y = 0; buffer.savedX = 0; buffer.savedY = 0
+                buffer.scrollTop = 0; buffer.scrollBottom = side - 1; buffer.marginLeft = 0; buffer.marginRight = side - 1
+                buffer.tabStops = Array(repeating: false, count: side)
+                buffer.semanticPromptStartRow = nil
+                if alternate { snapshot.alt = buffer } else { snapshot.normal = buffer }
+            }
+        }
+    }
+
+    /// The history chunk's decode: the same invariants for what it carries.
+    @Test func historyChunkDecodeRefusesCorruptValues() throws {
+        let owner = Self.make()
+        owner.feed(text: (0..<20).map { "line \($0) e\u{301}\r\n" }.joined())
+        let export = try #require(owner.exportForStreaming())
+        let valid = try #require(export.historyChunks(linesPerChunk: 5).first)
+        #expect(throws: Never.self) { _ = try TerminalHistoryChunk(encoded: valid.encoded()) }
+        func refuses(_ what: String, _ edit: (inout TerminalHistoryChunk) -> Void) {
+            var chunk = valid
+            edit(&chunk)
+            let bytes = chunk.encoded()
+            #expect(throws: TerminalStateSnapshotError.self, "\(what) decoded") { try TerminalHistoryChunk(encoded: bytes) }
+        }
+        refuses("zero cols") { $0.bufferCols = 0 }
+        refuses("zero rows") { $0.bufferRows = 0 }
+        refuses("a line narrower than the buffer") { $0.lines[0].cols = 29 }
+        // Import builds every line at its width before trimming: 1100 x 65535 > maximumCells.
+        // Decode only; never imported.
+        refuses("cells past the cap") { chunk in
+            var wide = chunk.lines[0]
+            wide.cols = 65535
+            chunk.lines = Array(repeating: wide, count: 1100)
+            chunk.semanticPromptStartRow = nil
+        }
+        refuses("no lines") { $0.lines = []; $0.semanticPromptStartRow = nil }
+        refuses("surrogate code") { $0.lines[0].cells[0].code = 0xD800 }
+        refuses("surrogate grapheme") { chunk in
+            let column = chunk.lines[0].cells.firstIndex { $0.graphemes != nil }!
+            chunk.lines[0].cells[column].graphemes = [0x65, 0xDC00]
+        }
+        refuses("width state 4") { $0.lines[0].cells[0].widthState = 4 }
     }
 
     #if os(macOS)
