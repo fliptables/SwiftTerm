@@ -97,6 +97,9 @@ struct SnapshotReader {
     mutating func optional<T>(_ read: (inout SnapshotReader) throws -> T) throws -> T? {
         try bool() ? try read(&self) : nil
     }
+    /// Bytes not read yet. Every counted unit takes at least one byte, so a count
+    /// bounded by this never makes decode allocate more than the input holds.
+    var remaining: Int { bytes.count - position }
     mutating func count(max: Int, _ what: String) throws -> Int {
         let value = try uint()
         guard value <= max else { throw TerminalStateSnapshotError.invalid(what) }
@@ -139,11 +142,11 @@ extension TerminalStateSnapshot {
             throw TerminalStateSnapshotError.unsupportedVersion(version)
         }
         var r = SnapshotReader(bytes: bytes, position: 8)
-        let attributeCount = try r.count(max: bytes.count, "attribute table")
+        let attributeCount = try r.count(max: r.remaining, "attribute table")
         var attributes: [Attribute] = []
         attributes.reserveCapacity(attributeCount)
         for _ in 0..<attributeCount { attributes.append(try SnapshotCodec.readAttribute(&r)) }
-        let payloadCount = try r.count(max: bytes.count, "payload table")
+        let payloadCount = try r.count(max: r.remaining, "payload table")
         var payloads: [String] = []
         for _ in 0..<payloadCount { payloads.append(try r.string()) }
 
@@ -153,6 +156,67 @@ extension TerminalStateSnapshot {
         let dropped = try r.uint()
         guard r.position == bytes.count else { throw TerminalStateSnapshotError.invalid("trailing bytes") }
         self.init(modes: modes, normal: normal, alt: alt, droppedPayloadCount: dropped)
+        try validate()
+    }
+
+    /// The invariants the exporter guarantees and import relies on unchecked: a stream that
+    /// breaks one was corrupted in transit, and must fail here rather than trap at import or
+    /// at the next byte fed. Runs before import allocates anything.
+    func validate() throws {
+        func check(_ condition: Bool, _ what: String) throws {
+            guard condition else { throw TerminalStateSnapshotError.invalid(what) }
+        }
+        // Terminal keeps exactly four G0-G3 sets, and gLevel indexes them.
+        try check(modes.gCharsets.count == 4, "charsets")
+        try check(modes.gLevel < 4, "gLevel")
+        var cells = 0
+        for (name, buffer) in [("normal", normal), ("alt", alt)] {
+            let cols = buffer.cols, rows = buffer.rows
+            let active = name == "alt" ? modes.altActive : !modes.altActive
+            // A resize reaches only the active buffer; the hidden one keeps its own grid.
+            try check(cols > 0 && rows > 0 && (!active || (cols == modes.cols && rows == modes.rows)), "\(name) grid")
+            try check(buffer.tabStops.count >= cols, "\(name) tab stops")
+            try check((buffer.scrollback ?? 0) <= TerminalStateSnapshot.maximumScrollback, "\(name) scrollback")
+            try check(buffer.lineCapacity >= rows && buffer.lineCapacity <= (buffer.scrollback ?? 0) + 65535
+                      && buffer.lineCapacity >= buffer.lines.count, "\(name) line capacity")
+            // An alternate buffer never activated exports no lines; the active one always has its grid.
+            // A screen part leaves out the lines above yBase, which upstream can hold past
+            // lines.count - rows (observed: an alternate buffer grown by a resize), so the grid
+            // is counted with the history still to come.
+            let held = buffer.lines.count + buffer.pendingHistoryLines
+            try check(held >= rows || (held == 0 && !active), "\(name) lines")
+            // A resize without reflow leaves lines wider than the grid; a narrower one trips
+            // Buffer.resize's post-condition (fatalError) at the next resize.
+            try check(buffer.lines.allSatisfy { $0.cols >= cols }, "\(name) line width")
+            try check(buffer.x >= 0 && buffer.x <= cols && buffer.savedX >= 0 && buffer.savedX <= cols, "\(name) column")
+            try check(buffer.y >= 0 && buffer.y < rows, "\(name) row")
+            // savedY is not kept inside the grid by a resize (observed -3 after a resize
+            // smaller); restore clamps it to 0..<rows (Terminal.restoreCursor). Do not tighten
+            // it to the grid. Its other readers do plain arithmetic with operands below 2^25
+            // (Terminal.resizeBuffers savedY - y, Buffer.resize savedY - amountToTrim, reflow
+            // savedY + linesToAdd), so any |savedY| <= Int32.max cannot overflow them.
+            try check(buffer.savedY.magnitude <= UInt(Int32.max), "\(name) saved row")
+            try check(buffer.scrollTop >= 0 && buffer.scrollTop <= buffer.scrollBottom && buffer.scrollBottom < rows,
+                      "\(name) scroll region")
+            try check(buffer.marginLeft >= 0 && buffer.marginLeft <= buffer.marginRight && buffer.marginRight < cols,
+                      "\(name) margins")
+            // The line list indexes modulo its capacity, so a negative row traps. Upstream can
+            // hold yBase past lines.count - rows (observed: an alternate buffer grown by a
+            // resize, yBase 6 over 14 lines of 14 rows), never past the lines held.
+            try check(buffer.yBase >= 0 && buffer.yBase <= buffer.lines.count
+                      && buffer.yDisp >= 0 && buffer.yDisp <= buffer.lines.count, "\(name) view")
+            // linesTop counts every line ever trimmed, so an honest one is not held to Int32; it
+            // is added to (Terminal.swift:8761, :8893, importHistoryChunk) and to row offsets
+            // (TerminalContentSnapshot.swift:565-576), so it stays far from Int.max.
+            try check(buffer.linesTop >= 0 && buffer.linesTop <= 1 << 62, "\(name) linesTop")
+            // Import allocates each line's own width in cells. Line widths are <= 65535 and the
+            // line count is bounded by the input bytes, so the sum cannot overflow, but say so.
+            for line in buffer.lines {
+                let (sum, overflow) = cells.addingReportingOverflow(line.cols)
+                try check(!overflow && sum <= TerminalStateSnapshot.maximumCells, "cells")
+                cells = sum
+            }
+        }
     }
 }
 
@@ -537,7 +601,8 @@ extension TerminalModesImage {
         terminalTitle = try r.string(); iconTitle = try r.string()
         var stacks: [[String]] = []
         for _ in 0..<2 {
-            let count = try r.count(max: 4096, "title stack")
+            // Upstream pushes without a cap (CSI 22 t); each title takes at least its length byte.
+            let count = try r.count(max: r.remaining, "title stack")
             var stack: [String] = []
             for _ in 0..<count { stack.append(try r.string()) }
             stacks.append(stack)
@@ -611,7 +676,7 @@ extension BufferImage {
         lineCapacity = try r.count(max: Int(Int32.max), "line capacity")
         guard lineCapacity > 0 else { throw TerminalStateSnapshotError.invalid("line capacity") }
         pendingHistoryLines = try r.count(max: lineCapacity, "pending history")
-        let lineCount = try r.count(max: min(lineCapacity, r.bytes.count), "lines")
+        let lineCount = try r.count(max: min(lineCapacity, r.remaining), "lines")
         var decoded: [LineImage] = []
         decoded.reserveCapacity(lineCount)
         for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
@@ -622,7 +687,7 @@ extension BufferImage {
         guard x >= 0, y >= 0, yBase >= 0, yDisp >= 0, scrollTop >= 0, scrollBottom >= 0 else {
             throw TerminalStateSnapshotError.invalid("negative cursor or region")
         }
-        let stopCount = try r.count(max: 65535, "tab stops")
+        let stopCount = try r.count(max: min(65535, r.remaining * 8), "tab stops")
         var stops: [Bool] = []
         stops.reserveCapacity(stopCount)
         var packed: UInt8 = 0
@@ -720,16 +785,21 @@ extension LineImage {
         isWrapped = try r.bool()
         bidiState = try SnapshotCodec.readBidi(&r)
         renderMode = try r.u8()
-        let markCount = try r.count(max: 64, "marks")
+        // One per kind per line, but a reflow joins the marks of the lines it joins.
+        let markCount = try r.count(max: r.remaining, "marks")
         var marks: [SemanticMark] = []
         for _ in 0..<markCount {
-            marks.append(SemanticMark(kind: try SnapshotCodec.kind(try r.u8()), column: try r.int(), group: try r.uvar()))
+            let kind = try SnapshotCodec.kind(try r.u8())
+            // A reflow moves a mark by plain arithmetic (BufferLine.swift:980, column - srcCol + dstCol).
+            let column = try r.int()
+            guard column.magnitude <= UInt(Int32.max) else { throw TerminalStateSnapshotError.invalid("mark column") }
+            marks.append(SemanticMark(kind: kind, column: column, group: try r.uvar()))
         }
         semanticMarks = marks
         hardContinuationGroup = try r.optional { try $0.uvar() }
         tailAttribute = try SnapshotCodec.attribute(&r, attributes)
         var current = tailAttribute
-        let cellCount = try r.count(max: cols, "cells")
+        let cellCount = try r.count(max: min(cols, r.remaining), "cells")
         var decoded: [CellImage] = []
         decoded.reserveCapacity(cellCount)
         while decoded.count < cellCount {
@@ -747,7 +817,10 @@ extension LineImage {
             guard flags & LineImage.asciiRun == 0 else { throw TerminalStateSnapshotError.invalid("cell flags") }
             if flags & LineImage.newAttribute != 0 { current = try SnapshotCodec.attribute(&r, attributes) }
             let code = try r.int()
-            guard code >= Int(Int32.min), code <= Int(Int32.max) else { throw TerminalStateSnapshotError.invalid("code") }
+            // 0 (blank) or a scalar the arena stores; anything else fails import's pack.
+            guard code == 0 || (code > 0 && code <= 0x10ffff && PackedCell.isValidUnicodeScalar(UInt32(code))) else {
+                throw TerminalStateSnapshotError.invalid("code")
+            }
             var width: Int8 = 1
             var widthState: UInt8 = 0
             if flags & LineImage.unusualWidth != 0 {
@@ -755,12 +828,22 @@ extension LineImage {
                 guard w >= Int(Int8.min), w <= Int(Int8.max) else { throw TerminalStateSnapshotError.invalid("width") }
                 width = Int8(w)
                 widthState = try r.u8()
+                guard PackedCell.WidthState(rawValue: widthState) != nil else {
+                    throw TerminalStateSnapshotError.invalid("width state")
+                }
             }
             var graphemes: [UInt32]? = nil
             if flags & LineImage.hasGraphemes != 0 {
-                let count = try r.count(max: 64, "grapheme")
+                // A cell takes any number of combining marks; each scalar takes at least one byte.
+                let count = try r.count(max: r.remaining, "grapheme")
                 var scalars: [UInt32] = []
-                for _ in 0..<count { scalars.append(UInt32(truncatingIfNeeded: try r.uvar())) }
+                for _ in 0..<count {
+                    let scalar = try r.uvar()
+                    guard scalar <= 0x10ffff, PackedCell.isValidUnicodeScalar(UInt32(scalar)) else {
+                        throw TerminalStateSnapshotError.invalid("grapheme scalar")
+                    }
+                    scalars.append(UInt32(scalar))
+                }
                 graphemes = scalars
             }
             var payload: String? = nil

@@ -304,6 +304,8 @@ enum DigestDescriber {
 
     static func describe(_ value: Any, depth: Int = 0) -> String {
         if depth > 8 { return depthExceeded }
+        // Quoted, so ["a, b"] and ["a", "b"], or "nil" and nil, describe differently.
+        if let text = value as? String { return text.debugDescription }
         if let color = value as? Color {
             return "rgb(\(color.red),\(color.green),\(color.blue))"
         }

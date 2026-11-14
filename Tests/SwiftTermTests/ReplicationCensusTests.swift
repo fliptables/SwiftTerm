@@ -230,8 +230,8 @@ final class ReplicationCensusTests {
         "terminal.reverseWraparound": b("\u{1b}[?45h"),
         // XTSAVE (cmdSavePrivateModes) saves only modes readDECPrivateMode knows: 2004 is one.
         "terminal.savedPrivateModes": b("\u{1b}[?2004h\u{1b}[?2004s"),
-        // XTWINOPS 22;1 (cmdWindowOptions) pushes the icon title; it needs a delegate (fresh() has one).
-        "terminal.terminalIconStack": b("\u{1b}]1;icon\u{7}\u{1b}[22;1t"),
+        // terminalIconStack: no hand row since the digest quotes strings (builder #10). The
+        // corpus pushes the empty icon title, and [""] used to describe as [] did.
         "terminal.lineFeedMode": b("\u{1b}[20h"),
         "terminal.smoothScroll": b("\u{1b}[?4h"),
         "terminal.xtermTitleSetHex": b("\u{1b}[>0t"),

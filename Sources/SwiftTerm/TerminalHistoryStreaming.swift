@@ -179,10 +179,10 @@ extension TerminalHistoryChunk {
             throw TerminalStateSnapshotError.unsupportedVersion(version)
         }
         var r = SnapshotReader(bytes: bytes, position: 8)
-        let attributeCount = try r.count(max: bytes.count, "attribute table")
+        let attributeCount = try r.count(max: r.remaining, "attribute table")
         var attributes: [Attribute] = []
         for _ in 0..<attributeCount { attributes.append(try SnapshotCodec.readAttribute(&r)) }
-        let payloadCount = try r.count(max: bytes.count, "payload table")
+        let payloadCount = try r.count(max: r.remaining, "payload table")
         var payloads: [String] = []
         for _ in 0..<payloadCount { payloads.append(try r.string()) }
         isAlternateBuffer = try r.bool()
@@ -192,12 +192,32 @@ extension TerminalHistoryChunk {
         bufferCols = try r.count(max: 65535, "chunk cols")
         bufferRows = try r.count(max: 65535, "chunk rows")
         semanticPromptStartRow = try r.optional { try $0.uint() }
-        let lineCount = try r.count(max: bytes.count, "lines")
+        let lineCount = try r.count(max: r.remaining, "lines")
         var decoded: [LineImage] = []
         decoded.reserveCapacity(lineCount)
         for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
         lines = decoded
-        if let row = semanticPromptStartRow, row >= lines.count { throw TerminalStateSnapshotError.invalid("prompt row") }
         guard r.position == bytes.count else { throw TerminalStateSnapshotError.invalid("trailing bytes") }
+        try validate()
+    }
+
+    /// The invariants the exporter guarantees: a chunk holds at least one line, none narrower
+    /// than the grid it was exported at (import checks that grid against the replica's own; a
+    /// resize without reflow leaves lines wider). The cells' own checks run in the line decode.
+    func validate() throws {
+        func check(_ condition: Bool, _ what: String) throws {
+            guard condition else { throw TerminalStateSnapshotError.invalid(what) }
+        }
+        try check(bufferCols > 0 && bufferRows > 0, "chunk grid")
+        try check(!lines.isEmpty, "chunk lines")
+        try check(lines.allSatisfy { $0.cols >= bufferCols }, "chunk line width")
+        if let row = semanticPromptStartRow { try check(row < lines.count, "prompt row") }
+        // Import allocates every line of the chunk at its own width before trimming any.
+        var cells = 0
+        for line in lines {
+            let (sum, overflow) = cells.addingReportingOverflow(line.cols)
+            try check(!overflow && sum <= TerminalStateSnapshot.maximumCells, "chunk cells")
+            cells = sum
+        }
     }
 }

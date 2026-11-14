@@ -40,6 +40,12 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
     /// The version of ``encoded()`` and of ``TerminalHistoryChunk/encoded()``
     /// (one constant for both). A decoder refuses any other, version 1 included.
     public static let formatVersion: UInt32 = 2
+    /// Decode's memory bounds. A host must keep scrollback ≤ `maximumScrollback` and
+    /// (scrollback + rows) × cols ≤ `maximumCells`; beyond either, its snapshots fail to
+    /// decode (an error, never a crash).
+    public static let maximumScrollback = 1 << 24
+    /// See ``maximumScrollback``: the cells of both buffers' lines together (8 bytes each).
+    public static let maximumCells = 1 << 26
     static let magic: [UInt8] = Array("STSS".utf8)
 
     /// The categories of state the snapshot deliberately leaves out.
