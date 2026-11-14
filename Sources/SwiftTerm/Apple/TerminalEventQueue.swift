@@ -45,8 +45,21 @@ enum TerminalEvent: Int, CaseIterable, Sendable {
     fileprivate var mask: UInt32 { 1 << UInt32(rawValue) }
 }
 
-/// Thread-safe, allocation-free coalescing queue: at most one main-queue
-/// block outstanding.
+extension TerminalEvent {
+    /// The name a scheduled hop is counted under in ``ProfilingHopCounter``
+    /// (Scape fork, IT-1075 diagnostics).
+    fileprivate var hopName: StaticString {
+        switch self {
+        case .bufferActivated: return "TerminalEventQueue.post(.bufferActivated)"
+        case .mouseModeChanged: return "TerminalEventQueue.post(.mouseModeChanged)"
+        case .bell: return "TerminalEventQueue.post(.bell)"
+        case .programStatusChanged: return "TerminalEventQueue.post(.programStatusChanged)"
+        }
+    }
+}
+
+/// Thread-safe, allocation-free coalescing queue.
+/// (Scape fork: at most one main-queue block is outstanding.)
 final class TerminalEventQueue: Sendable {
     private struct State {
         var pending: UInt32 = 0
@@ -87,7 +100,7 @@ final class TerminalEventQueue: Sendable {
     /// Records an event. Safe on any thread, and cheap enough for the parse
     /// path: one lock, one bitwise or, and at most one dispatch per drain
     /// window.
-    func post(_ event: TerminalEvent, caller: StaticString = #function) {
+    func post(_ event: TerminalEvent) {
         // Deliver inline when the caller is already on the main thread, nothing
         // is queued ahead of this event, and the view says it is safe. This
         // keeps the long-standing synchronous behaviour for hosts that call
@@ -135,7 +148,7 @@ final class TerminalEventQueue: Sendable {
 
         guard needsSchedule else { return }
         if ProfilingStats.enabled {
-            ProfilingHopCounter.shared.record(caller)
+            ProfilingHopCounter.shared.record(event.hopName)
         }
         DispatchQueue.main.async { @MainActor [weak self] in
             self?.drain()
