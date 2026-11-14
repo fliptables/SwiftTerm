@@ -205,10 +205,11 @@ internal enum ByteRunScanner {
     @inline(never)
     static func vectorScanC0(in bytes: Span<UInt8>, from start: Int) -> Int {
         bytes.withUnsafeBufferPointer { buffer in
-            // An empty span has no base address. Nothing to scan: the
-            // loop below would return `start` without a load.
-            guard let baseAddress = buffer.baseAddress else { return start }
-            let base = UnsafeRawPointer(baseAddress)
+            // IT-2001 D9: an empty span has no base address, and the force
+            // unwrap below would trap (Linux). Nothing to scan: the loop
+            // would return `start` without a load.
+            guard buffer.baseAddress != nil else { return start }
+            let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start
             while index <= buffer.count - vectorWidth {
                 let vector = base.loadUnaligned(
@@ -227,10 +228,11 @@ internal enum ByteRunScanner {
     @inline(never)
     static func vectorScanNonASCII(in bytes: Span<UInt8>, from start: Int) -> Int {
         bytes.withUnsafeBufferPointer { buffer in
-            // An empty span has no base address. Nothing to scan: the
-            // loop below would return `start` without a load.
-            guard let baseAddress = buffer.baseAddress else { return start }
-            let base = UnsafeRawPointer(baseAddress)
+            // IT-2001 D9: an empty span has no base address, and the force
+            // unwrap below would trap (Linux). Nothing to scan: the loop
+            // would return `start` without a load.
+            guard buffer.baseAddress != nil else { return start }
+            let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start
             while index <= buffer.count - vectorWidth {
                 let vector = base.loadUnaligned(
@@ -252,10 +254,11 @@ internal enum ByteRunScanner {
     ) -> Int {
         let target = ByteVector(repeating: value)
         return bytes.withUnsafeBufferPointer { buffer in
-            // An empty span has no base address. Nothing to scan: the
-            // loop below would return `start` without a load.
-            guard let baseAddress = buffer.baseAddress else { return start }
-            let base = UnsafeRawPointer(baseAddress)
+            // IT-2001 D9: an empty span has no base address, and the force
+            // unwrap below would trap (Linux). Nothing to scan: the loop
+            // would return `start` without a load.
+            guard buffer.baseAddress != nil else { return start }
+            let base = UnsafeRawPointer(buffer.baseAddress!)
             var index = start
             while index <= buffer.count - vectorWidth {
                 let vector = base.loadUnaligned(
