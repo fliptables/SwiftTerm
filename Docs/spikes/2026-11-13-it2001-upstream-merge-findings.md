@@ -418,6 +418,25 @@ with no title pending it is `nil`: no lock and no allocation are added. Upstream
 ends `DispatchQueue.main.async`. IT-1075's measurement is re-done for D2 as the plan requires, and
 RenderBench covers it.
 
+**D2: a title when the view is not drawing (lead 14's questions).** With no running tick source
+(no window, hidden, occluded, minimised), `FrameDriverSignal.publish` (Apple/FrameDriver.swift:162-176)
+schedules one main-actor task. `consumeSignalOnMain` (:396-398) then applies view updates whether
+or not it draws. Tests: `MainHopCoalescingTests.aViewInNoWindowDeliversItsTitle` and
+`.aViewInAHiddenWindowDeliversItsTitle`.
+
+A title recorded while the link RUNS publishes nothing and waits for the next tick (:170). If the
+view is hidden or detached before that tick, the suspension path delivers it:
+`applyVisibilityPolicyOnMain` sets `running = false` (:550-552). `running`'s `didSet` calls
+`signal.setLinkRunning(false)` (:323-331), and that schedules one delivery when anything is pending
+(:129-140). Test: `FrameDriverTests.aViewUpdateRecordedWhileRunningIsDeliveredWhenTheLinkStopsBeforeItsTick`
+(hidden and detached). It is green and has no hand-called tick. Its premises are asserted: the
+link runs when the title is set, the update is deferred, the driver is suspended after.
+
+The test drives the driver through its existing `ManualTickSource`. A real `CADisplayLink` was not
+observed, but the path from suspension to `setLinkRunning` does not depend on the backend. The
+shipped pin (`7ec59163a`) delivers titles through `TerminalEventQueue.postTitle`'s main drain,
+independent of frames, so it has neither question.
+
 **D7 after the sweep (reverses the plan's pin 7 and the 17:55Z condition b).** Upstream's
 `reconcileSynchronizedOutputWatchdog` and `applySynchronizedOutputWatchdog` are back byte for byte.
 The gate is ONE block added in reconcile, before upstream's call:

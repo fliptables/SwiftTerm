@@ -389,6 +389,47 @@ struct FrameDriverTests {
         driver.shutdown()
     }
 
+    /// IT-2001 D2, lead 14: a view update (a title) recorded while the link
+    /// RUNS publishes no task and trusts the next tick. If the view is then
+    /// hidden, or leaves its window, before that tick, the suspension path
+    /// itself must deliver it: no tick is called by hand here. Checked for
+    /// both inputs to suspension.
+    @Test(arguments: ["hidden", "detached"])
+    func aViewUpdateRecordedWhileRunningIsDeliveredWhenTheLinkStopsBeforeItsTick(_ how: String) async {
+        let source = ManualTickSource()
+        let driver = FrameDriver(tickSource: source)
+        var updates = 0
+        var tickCount = 0
+        driver.onViewUpdate = { updates += 1 }
+        driver.onTick = { tickCount += 1 }
+
+        driver.markDirty()
+        await drainMainQueue()
+        #expect(source.isRunning, "premise: the link runs when the title is set")
+        let ticksBefore = tickCount
+        let deliveries = driver.currentCounters.deliveries
+
+        await Task.detached { [signal = driver.signal] in
+            signal.requestViewUpdate()
+        }.value
+        await drainMainQueue()
+        #expect(driver.currentCounters.deliveries == deliveries, "premise: deferred to the next tick")
+        #expect(updates == 0)
+
+        if how == "hidden" {
+            driver.setVisibilityOnMain(visible: false)
+        } else {
+            driver.setWindowAttachedOnMain(false)
+        }
+        await drainMainQueue()
+
+        #expect(driver.isVisibilitySuspended, "premise: suspended after")
+        #expect(!source.isRunning)
+        #expect(updates == 1, "the title recorded before the switch reaches the delegate")
+        #expect(tickCount == ticksBefore)
+        driver.shutdown()
+    }
+
     /// A program that wraps every frame in synchronized output ends it
     /// thousands of times a second. Each end, and each cursor style change,
     /// used to queue its own main-queue block; with the main thread asleep
