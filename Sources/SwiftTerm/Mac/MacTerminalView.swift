@@ -1882,7 +1882,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         overlayScrollerIsTracking = isTracking
         showOverlayScroller()
     }
-
+    
     // Re-added at the IT-304 upstream merge: upstream's shared
     // updateUserScrollingState (AppleTerminalView) writes this view-level flag and
     // keeps it in sync with terminal.userScrolling (public as isUserScrolling), the
@@ -2932,7 +2932,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         }
         setNeedsDisplay(bounds)
     }
-
+    
     private func shiftBypassesMouseReporting(for event: NSEvent) -> Bool {
         withTerminal { _ in
             shiftBypassesMouseReportingLocked(for: event)

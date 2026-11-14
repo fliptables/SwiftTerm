@@ -109,7 +109,7 @@ public protocol TerminalDelegate: AnyObject {
     /// host's ordered valve and is applied as one.
     /// The default implementation does nothing.
     func scheduleSynchronizedOutputTimeout (source: Terminal, afterMilliseconds: UInt32)
-
+    
     /// Should raise the bell
     /// The default implementation does nothing.
     func bell (source: Terminal)

@@ -158,7 +158,7 @@ public class PseudoTerminalHelpers {
             if let cCurrentDirectory {
                 _ = chdir(cCurrentDirectory)
             }
-
+            
             // Close every inherited fd >= 3 before exec (fdLimit — the bound
             // on allocatable fd numbers — was sampled pre-fork above, so this
             // sweep covers every fd the parent could possibly have open).
