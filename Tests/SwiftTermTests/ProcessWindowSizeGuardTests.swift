@@ -4,8 +4,9 @@ import Testing
 
 @testable import SwiftTerm
 
-/// IT-2001 D6: the fork's degenerate-size guard lives inside upstream's
-/// `syncProcessWindowSizeIfNeeded()`, so both of its callers (a grid size
+/// IT-2001 D6: the fork's degenerate-size guard is a line added inside
+/// upstream's `syncProcessWindowSizeIfNeeded()`, before upstream's own
+/// "changed since the last send" check, so both of its callers (a grid size
 /// change, and a move to a window or a backing-scale change) are covered.
 /// A TIOCSWINSZ with a degenerate size (SwiftUI sets a 0x0 frame while an
 /// NSViewRepresentable is inserted) corrupts the shell's readline during its
@@ -16,26 +17,20 @@ struct ProcessWindowSizeGuardTests {
         winsize(ws_row: rows, ws_col: cols, ws_xpixel: cols &* 8, ws_ypixel: rows &* 16)
     }
 
-    private static let previous = size(cols: 80, rows: 24)
-
     @Test func zeroByZeroSendsNothing() {
-        #expect(!LocalProcessTerminalView.windowSizeShouldBeSent(Self.size(cols: 0, rows: 0), previous: Self.previous))
+        #expect(!LocalProcessTerminalView.windowSizeIsSendable(Self.size(cols: 0, rows: 0)))
     }
 
     @Test func oneByOneSendsNothing() {
-        #expect(!LocalProcessTerminalView.windowSizeShouldBeSent(Self.size(cols: 1, rows: 1), previous: Self.previous))
+        #expect(!LocalProcessTerminalView.windowSizeIsSendable(Self.size(cols: 1, rows: 1)))
     }
 
     @Test func twoColumnsByOneRowSends() {
-        #expect(LocalProcessTerminalView.windowSizeShouldBeSent(Self.size(cols: 2, rows: 1), previous: Self.previous))
+        #expect(LocalProcessTerminalView.windowSizeIsSendable(Self.size(cols: 2, rows: 1)))
     }
 
-    @Test func anUnchangedSizeSendsNothing() {
-        #expect(!LocalProcessTerminalView.windowSizeShouldBeSent(Self.previous, previous: Self.previous))
-    }
-
-    @Test func aChangedSizeSends() {
-        #expect(LocalProcessTerminalView.windowSizeShouldBeSent(Self.size(cols: 100, rows: 30), previous: Self.previous))
+    @Test func aNormalSizeSends() {
+        #expect(LocalProcessTerminalView.windowSizeIsSendable(Self.size(cols: 80, rows: 24)))
     }
 }
 #endif

@@ -338,26 +338,27 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
         guard let processAdapter, let process else { return }
         var size = getWindowSize()
         let previous = processAdapter.getWindowSize()
-        guard LocalProcessTerminalView.windowSizeShouldBeSent(size, previous: previous) else {
+        // IT-2001 D6: a degenerate size is never sent (`windowSizeIsSendable`).
+        guard LocalProcessTerminalView.windowSizeIsSendable(size) else { return }
+        guard size.ws_row != previous.ws_row || size.ws_col != previous.ws_col ||
+              size.ws_xpixel != previous.ws_xpixel || size.ws_ypixel != previous.ws_ypixel else {
             return
         }
         processAdapter.updateWindowSize(size)
         _ = process.updateWindowSize(&size)
     }
 
-    /// Whether `syncProcessWindowSizeIfNeeded()` sends `size` to the PTY
-    /// (IT-2001 D6): only a size of at least 2 columns and 1 row that differs
-    /// from the last one sent.
+    /// Whether `syncProcessWindowSizeIfNeeded()` may send `size` to the PTY at
+    /// all (IT-2001 D6): only a size of at least 2 columns and 1 row. Upstream's
+    /// own check then sends it only if it differs from the last one sent.
     ///
     /// Scape fork: SwiftUI sets a 0x0 frame while an NSViewRepresentable is
-    /// inserted, and a TIOCSWINSZ with a degenerate size (rows=1/cols=2 was
-    /// the case seen) corrupts the shell's readline during its start-up,
-    /// breaking Tab completion. Only the send is skipped: `sizeChanged`
-    /// still notifies the process delegate, as upstream does.
-    static func windowSizeShouldBeSent(_ size: winsize, previous: winsize) -> Bool {
-        guard size.ws_col >= 2, size.ws_row >= 1 else { return false }
-        return size.ws_row != previous.ws_row || size.ws_col != previous.ws_col ||
-            size.ws_xpixel != previous.ws_xpixel || size.ws_ypixel != previous.ws_ypixel
+    /// inserted, and a TIOCSWINSZ with a degenerate size corrupts the shell's
+    /// readline during its start-up, breaking Tab completion. Only the send is
+    /// skipped: `sizeChanged` still notifies the process delegate, as upstream
+    /// does.
+    static func windowSizeIsSendable(_ size: winsize) -> Bool {
+        size.ws_col >= 2 && size.ws_row >= 1
     }
 
     /**
@@ -365,7 +366,7 @@ open class LocalProcessTerminalView: TerminalView, TerminalViewDelegate {
      */
     public func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
         // IT-2001: D6. Upstream's sync; the fork's degenerate-size guard is inside it
-        // (`windowSizeShouldBeSent`).
+        // (`windowSizeIsSendable`).
         syncProcessWindowSizeIfNeeded()
         
         processDelegate?.sizeChanged (source: self, newCols: newCols, newRows: newRows)
