@@ -95,7 +95,6 @@ struct TerminalModesImage: Equatable, Sendable {
     var cols: Int
     var rows: Int
     var altActive: Bool
-    var tabStopWidth: Int
     var cursorStyle: CursorStyle
     var synchronizedOutputActive: Bool
     var applicationKeypad: Bool
@@ -118,7 +117,6 @@ struct TerminalModesImage: Equatable, Sendable {
     var colorSchemeIsLight: Bool
     var charset: [UInt8: String]?
     var gCharsets: [[UInt8: String]?]
-    var gcharset: Int
     var reverseWraparound: Bool
     var currentAttribute: Attribute
     var gLevel: UInt8
@@ -207,8 +205,6 @@ struct BufferImage: Equatable, Sendable {
     var y: Int
     var yBase: Int
     var yDisp: Int
-    var xDisp: Int
-    var xBase: Int
     var linesTop: Int
     var scrollTop: Int
     var scrollBottom: Int
@@ -282,7 +278,6 @@ extension Terminal {
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
             altActive: isCurrentBufferAlternate,
-            tabStopWidth: replicationTabStopWidth,
             cursorStyle: options.cursorStyle,
             synchronizedOutputActive: synchronizedOutputActive,
             applicationKeypad: replicationApplicationKeypad,
@@ -307,7 +302,6 @@ extension Terminal {
             colorSchemeIsLight: colorScheme == .light,
             charset: replicationCharset,
             gCharsets: replicationGCharsets,
-            gcharset: replicationGCharset,
             reverseWraparound: replicationReverseWraparound,
             currentAttribute: currentAttribute,
             gLevel: replicationGLevel,
@@ -394,7 +388,7 @@ extension Terminal {
             pendingHistoryLines: history,
             lines: lines,
             x: buffer.x, y: buffer.y, yBase: buffer.replicationYBase - history, yDisp: max(0, buffer.yDisp - history),
-            xDisp: buffer.replicationXDisp, xBase: buffer.replicationXBase, linesTop: buffer.replicationLinesTop,
+            linesTop: buffer.replicationLinesTop,
             scrollTop: buffer.scrollTop, scrollBottom: buffer.scrollBottom,
             marginLeft: buffer.marginLeft, marginRight: buffer.marginRight,
             tabStops: buffer.replicationTabStops,
@@ -451,13 +445,18 @@ extension Terminal {
 
 extension Terminal {
     /// Replaces this terminal's emulator state with `snapshot`. Call under
-    /// `terminalLock`, on a terminal whose options match the exporter's
-    /// (scrollback, palette strategy). A replica sets ``respondsToQueries`` to
+    /// `terminalLock`, on a terminal whose palette strategy matches the
+    /// exporter's; the buffers are rebuilt with the exporter's scrollback, whatever
+    /// this terminal's options say. A replica sets ``respondsToQueries`` to
     /// `false` first.
     ///
     /// The importer's images are cleared (images are not carried), and the
     /// colours an application set with OSC 10, 11 and 12 are installed over the
     /// importer's own host colours, telling the delegate as those sequences do.
+    /// `cursorColor` is carried as set: a host that writes it directly (not
+    /// through the view's caret colour) loses that value at import.
+    /// Delegate notifications during import (program status, the three colours)
+    /// see the new modes and buffers; the screen is refreshed after.
     public func importState(_ snapshot: TerminalStateSnapshot) {
         let modes = snapshot.modes
         var payloads: [String: TinyAtom] = [:]
@@ -469,7 +468,6 @@ extension Terminal {
         replicationRows = modes.rows
         options.cols = modes.cols
         options.rows = modes.rows
-        replicationTabStopWidth = modes.tabStopWidth
 
         let normal = makeBuffer(snapshot.normal, payloads: &payloads)
         let alt = makeBuffer(snapshot.alt, payloads: &payloads)
@@ -503,7 +501,6 @@ extension Terminal {
         replicationColorScheme = modes.colorSchemeIsLight ? .light : .dark
         replicationCharset = modes.charset
         replicationGCharsets = modes.gCharsets
-        replicationGCharset = modes.gcharset
         replicationReverseWraparound = modes.reverseWraparound
         replicationSetCurrentAttribute(modes.currentAttribute)
         replicationGLevel = modes.gLevel
@@ -570,7 +567,7 @@ extension Terminal {
     }
 
     private func makeBuffer(_ image: BufferImage, payloads: inout [String: TinyAtom]) -> Buffer {
-        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabStopWidth: replicationTabStopWidth,
+        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabStopWidth: tabStopWidth,
                                             scrollback: image.scrollback, bidiState: image.defaultBidiState,
                                             arena: replicationCellArena)
         buffer.replicationTerminal = self
@@ -584,8 +581,6 @@ extension Terminal {
         buffer.y = image.y
         buffer.replicationYBase = image.yBase
         buffer.yDisp = image.yDisp
-        buffer.replicationXDisp = image.xDisp
-        buffer.replicationXBase = image.xBase
         buffer.replicationLinesTop = image.linesTop
         buffer.scrollTop = image.scrollTop
         buffer.scrollBottom = image.scrollBottom

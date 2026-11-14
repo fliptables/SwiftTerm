@@ -75,10 +75,8 @@ extension Terminal {
         "portableRenderCells": "render cache",
         "lineChanges": "render change tracking",
         "payloads": "atom identity, slots and collection thresholds (payloads are compared by target)",
-        "tabStopWidth": "the host's option, set only at construction",
-        "smoothScroll": "never set: SwiftTerm has no smooth scrolling",
-        "lineFeedMode": "set only from the host's convertEol option",
-        "gcharset": "never set except to 0 at reset",
+        "tabStopWidth": "always 8: upstream never reads options.tabStopWidth (IT-2023); reset and resize rebuild tab stops from it (setup, resize), so the day upstream honours the option it becomes a construction parameter like scrollback",
+        "gcharset": "no parsed byte writes it: 0 at init and at reset, read nowhere",
     ]
     #if DEBUG
     static let debugExcludedTerminalProperties: [String: String] = [
@@ -124,10 +122,18 @@ extension Terminal {
         "semanticPromptStartLine": "compared as a row",
         "semanticPromptStartRowCache": "search hint",
         "semanticPromptRowScanCount": "diagnostic counter",
-        "xBase": "always 0: SwiftTerm has no horizontal scroll",
-        "xDisp": "always 0: SwiftTerm has no horizontal scroll",
-        "hasScrollback": "fixed at construction from the options the replica shares",
-        "scrollback": "fixed at construction from the options the replica shares",
+        "xBase": "no parsed byte writes it: 0 at init and in clear(); SwiftTerm has no horizontal scroll",
+        "xDisp": "no parsed byte writes it: 0 at init; SwiftTerm has no horizontal scroll",
+        "hasScrollback": "derived from scrollback (init, changeHistorySize), which is carried",
+    ]
+
+    /// The third census class: construction parameters. No parsed byte writes them, but
+    /// import BUILDS the replica's buffers from them, so they are carried and compared: the
+    /// replica matches the owner whatever its own options say (the app's viewer replica is
+    /// built with app options; a smaller scrollback would silently drop history).
+    @_spi(Replication)
+    public static let replicationConstructionBufferParameters: [String: String] = [
+        "scrollback": "the history capacity import builds each buffer with",
     ]
 
     /// Every stored property of `Buffer` the digest leaves out, on this build.

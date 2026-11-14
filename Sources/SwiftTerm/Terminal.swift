@@ -10948,7 +10948,6 @@ extension Terminal {
     // Grid and buffers
     var replicationCols: Int { get { _cols } set { _cols = newValue } }
     var replicationRows: Int { get { _rows } set { _rows = newValue } }
-    var replicationTabStopWidth: Int { get { tabStopWidth } set { tabStopWidth = newValue } }
     var replicationCellArena: CellArena { cellArena }
     var replicationNormalBuffer: Buffer { get { normalBuffer } set { normalBuffer = newValue } }
     var replicationAltBuffer: Buffer { get { altBuffer } set { altBuffer = newValue } }
@@ -11102,7 +11101,6 @@ extension Terminal {
     // Character sets and attributes
     var replicationCharset: [UInt8: String]? { get { charset } set { charset = newValue } }
     var replicationGCharsets: [[UInt8: String]?] { get { gCharsets } set { gCharsets = newValue } }
-    var replicationGCharset: Int { get { gcharset } set { gcharset = newValue } }
     /// Read the attribute with the public ``currentAttribute``.
     func replicationSetCurrentAttribute(_ attribute: Attribute) { setCurrentAttribute(attribute) }
     var replicationAnsiColors: [Color] { get { ansiColors } set { ansiColors = newValue } }

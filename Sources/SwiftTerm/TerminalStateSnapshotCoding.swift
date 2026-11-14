@@ -413,7 +413,7 @@ enum SnapshotCodec {
 
 extension TerminalModesImage {
     func encode(_ w: inout SnapshotWriter, attributes: inout AttributeTable) {
-        w.uint(cols); w.uint(rows); w.bool(altActive); w.uint(tabStopWidth)
+        w.uint(cols); w.uint(rows); w.bool(altActive)
         w.string(cursorStyle.tagName)
         w.bool(synchronizedOutputActive)
         w.bool(applicationKeypad); w.bool(applicationCursor); w.bool(reverseColors)
@@ -433,7 +433,7 @@ extension TerminalModesImage {
         SnapshotCodec.write(charset, &w)
         w.uint(gCharsets.count)
         for set in gCharsets { SnapshotCodec.write(set, &w) }
-        w.int(gcharset); w.bool(reverseWraparound)
+        w.bool(reverseWraparound)
         w.uint(attributes.id(currentAttribute))
         w.u8(gLevel); w.bool(cursorBlink); w.bool(allow80To132); w.bool(lineFeedMode); w.bool(smoothScroll)
         w.uint(paletteOverrides.count)
@@ -475,7 +475,7 @@ extension TerminalModesImage {
     init(_ r: inout SnapshotReader, attributes: [Attribute]) throws {
         cols = try r.count(max: 65535, "cols"); rows = try r.count(max: 65535, "rows")
         guard cols > 0, rows > 0 else { throw TerminalStateSnapshotError.invalid("grid") }
-        altActive = try r.bool(); tabStopWidth = try r.count(max: 65535, "tab stop width")
+        altActive = try r.bool()
         let styleName = try r.string()
         guard let style = CursorStyle(tagName: styleName) else { throw TerminalStateSnapshotError.invalid("cursor style") }
         cursorStyle = style
@@ -506,7 +506,7 @@ extension TerminalModesImage {
         var sets: [[UInt8: String]?] = []
         for _ in 0..<setCount { sets.append(try SnapshotCodec.readCharset(&r)) }
         gCharsets = sets
-        gcharset = try r.int(); reverseWraparound = try r.bool()
+        reverseWraparound = try r.bool()
         currentAttribute = try SnapshotCodec.attribute(&r, attributes)
         gLevel = try r.u8(); cursorBlink = try r.bool(); allow80To132 = try r.bool()
         lineFeedMode = try r.bool(); smoothScroll = try r.bool()
@@ -581,7 +581,7 @@ extension BufferImage {
         w.uint(pendingHistoryLines)
         w.uint(lines.count)
         for line in lines { line.encode(&w, attributes: &attributes, payloads: &payloads) }
-        for value in [x, y, yBase, yDisp, xDisp, xBase, linesTop, scrollTop, scrollBottom, marginLeft, marginRight] {
+        for value in [x, y, yBase, yDisp, linesTop, scrollTop, scrollBottom, marginLeft, marginRight] {
             w.int(value)
         }
         w.uint(tabStops.count)
@@ -617,7 +617,7 @@ extension BufferImage {
         for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
         lines = decoded
         x = try r.int(); y = try r.int(); yBase = try r.int(); yDisp = try r.int()
-        xDisp = try r.int(); xBase = try r.int(); linesTop = try r.int()
+        linesTop = try r.int()
         scrollTop = try r.int(); scrollBottom = try r.int(); marginLeft = try r.int(); marginRight = try r.int()
         guard x >= 0, y >= 0, yBase >= 0, yDisp >= 0, scrollTop >= 0, scrollBottom >= 0 else {
             throw TerminalStateSnapshotError.invalid("negative cursor or region")

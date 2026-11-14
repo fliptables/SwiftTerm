@@ -62,7 +62,7 @@ final class ReplicationCensusTests {
     /// them, but import BUILDS the replica's buffers from them, so they are carried and
     /// digested: the replica matches the owner whatever its own options say.
     static let constructionTerminal: Set<String> = []
-    static let constructionBuffer: Set<String> = ["scrollback"]
+    static let constructionBuffer = Set(Terminal.replicationConstructionBufferParameters.keys)
 
     static let carriedLine: Set<String> = [
         "isWrappedValue", "bidiStateValue", "renderModeValue", "semanticMarksValue",

@@ -2142,8 +2142,6 @@ extension Buffer {
 
     // Scroll position and margins not covered by public API
     var replicationYBase: Int { get { yBase } set { yBase = newValue } }
-    var replicationXDisp: Int { get { xDisp } set { xDisp = newValue } }
-    var replicationXBase: Int { get { xBase } set { xBase = newValue } }
     var replicationLinesTop: Int { get { linesTop } set { linesTop = newValue } }
     var replicationTabStops: [Bool] { get { tabStops } set { tabStops = newValue } }
 
