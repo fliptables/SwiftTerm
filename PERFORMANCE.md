@@ -45,19 +45,316 @@ The suite contains these vtebench cases:
 - `scrolling` and four scrolling-region variants
 - `scrolling_fullscreen`, `sync_medium_cells`, and `unicode`
 
-Six opt-in hardening cases cover ASCII and wide-cell seams, horizontal
-margins, and bounded OSC input. Enable them without changing the default
+### Ghostty terminal-stream workloads
+
+An opt-in group covers the input classes reported in Ghostty commit
+`54d162da5bea1d95399574495bde4ddb91df0784`. Ghostty used its full
+terminal-stream benchmark at 120 by 80 cells and read input in 64 KiB blocks.
+The commit found its largest change on a stream with three attributes in each
+SGR sequence. Run the SwiftTerm cases with:
+
+```bash
+cd Tools/SwiftTermBenchmarks
+SWIFTTERM_GHOSTTY_STREAM_BENCHMARKS=1 \
+swift package benchmark --target SwiftTermBenchmarks --filter 'ghostty_.*'
+```
+
+The cases are `ghostty_ascii`, `ghostty_utf8`, `ghostty_osc`,
+`ghostty_styled_plain`, `ghostty_styled_single`, `ghostty_styled_heavy`,
+`ghostty_styled_multi`, and `ghostty_styled_mixed`. The single and multi cases
+print the same text at the same run boundaries. The single case sends three
+one-attribute SGR sequences; the multi case sends one three-attribute
+sequence. Both apply the same final style at each boundary. This pair helps
+isolate the cost of multi-attribute SGR handling. The plain, ASCII, and UTF-8
+cases give controls without SGR; the mixed case also includes OSC 8 links and
+combining marks.
+
+These streams are deterministic Swift adaptations of Ghostty's generators.
+They are not byte-for-byte copies of Ghostty's benchmark files. The exact
+commands and corpus files behind the commit's timings are not in the Ghostty
+repository. Its 2.6 GB `out.txt` recording is also unavailable here. Each
+SwiftTerm sample has at least 1 MiB, uses a 120-by-80 terminal, and feeds
+prebuilt 64 KiB chunks. File I/O and corpus generation are outside the timed
+region. Compare SwiftTerm revisions with the same case; do not compare the
+absolute times with Ghostty's published times.
+
+The direct profiler also accepts these names, for example:
+
+```bash
+swift build -c release --product SwiftTermProfile
+.build/release/SwiftTermProfile ghostty_styled_multi --iterations 40
+```
+
+### OSC 9 dispatch — 2026-11-01
+
+Ghostty PRs [#13220](https://github.com/ghostty-org/ghostty/pull/13220) and
+[#13826](https://github.com/ghostty-org/ghostty/pull/13826) prompted a review
+of the stream path. SwiftTerm already batches ASCII and Unicode print runs,
+parses ordinary CSI sequences in one pass, and skips unchanged SGR styles.
+Ghostty's projected page growth in #13826 does not match SwiftTerm's fixed
+cell arena, so it was not copied.
+
+A Time Profiler run of `ghostty_osc` showed that unrelated OSC 9 messages
+spent about 27% of feed time in the progress-report parser. That parser made a
+String and split fields before it checked the `4;` command prefix. It now
+rejects other OSC 9 messages with a two-byte check. Valid progress reports
+still use the existing parser.
+
+In an A-B-B-A Release check on this machine, each process fed 150 samples
+with four warmups. `ghostty_osc` took 1.792 / 1.768 seconds before and
+1.321 / 1.308 seconds after, about 26% less time. `ghostty_utf8`,
+`ghostty_styled_multi`, and `ghostty_styled_mixed` were within run-to-run
+variation. These results apply to this synthetic OSC mix; they do not predict
+the same gain for all OSC input. All 113 focused OSC tests passed.
+
+Nine opt-in hardening cases cover ASCII and wide-cell seams, horizontal
+margins, bounded OSC input, short title OSC commands, and a half-block image
+that changes color around every cell (`hardening_block_color_cells`). Enable them without changing the default
 vtebench selection:
 
 ```bash
 cd Tools/SwiftTermBenchmarks
 SWIFTTERM_HARDENING_BENCHMARKS=1 \
-swift package benchmark --target SwiftTermBenchmarks --filter hardening_
+swift package benchmark --target SwiftTermBenchmarks --filter 'hardening_.*'
 ```
+
+Ten opt-in OSC 8 cases cover link parsing, link output, link reuse and
+release, and link lookup. No vtebench case sends OSC 8. Run them when a change
+touches hyperlinks, payload atoms, or the print path. See
+`Tools/SwiftTermBenchmarks/README.md` for the cases and their link check.
+
+```bash
+cd Tools/SwiftTermBenchmarks
+SWIFTTERM_OSC8_BENCHMARKS=1 \
+swift package benchmark --target SwiftTermBenchmarks --filter 'osc8_.*'
+```
+
+Use the Benchmark package's baseline commands for a headless A/B run. Record
+a baseline on the first revision, then compare the second revision against
+it. This is more reliable than comparing result files by hand.
+
+```bash
+cd Tools/SwiftTermBenchmarks
+swift package benchmark baseline update main      # on the first revision
+swift package benchmark baseline compare main     # on the second revision
+```
+
+### OSC 7501 regression fix — 2026-10-08
+
+The remaining OSC regression is removed in the measured engine cases.
+The final paired 22-case Release suite has no slowdown above 1.5% in both
+run orders against the original baseline, `15fed4fd`. This does not establish
+UI or PTY latency.
+
+The status-prefix matcher added work to ordinary OSC commands. The matcher
+and byte-copy helper are now inlined, with an early check for a non-`7`
+first byte. Those changes alone did not reliably restore short whole OSC
+performance. The saved profile also showed substantial allocation and copy
+work: both the baseline and the feature version discarded the cleared OSC
+buffer at each new sequence.
+
+The accepted [storage patch](Docs/performance-osc7501-storage-fix.patch)
+uses the existing bounded reset at OSC start. Small cleared buffers are
+reused; overflow or capacity above 1 MiB still releases storage. A
+`@inline(never)` wrapper keeps this reset outside the main parser code.
+The inline-reset version had a repeatable scrolling cost in follow-up runs
+and was rejected. Scanner and dispatch annotation changes were also tested
+separately and rejected. Overflow logging remains DEBUG-only.
+
+Allocation counting confirms the storage change. One sample contains
+104,858 short reports: the previous version made 104,858 allocations, and
+the final version made one. Both run orders gave the same counts.
+All 241 focused tests passed. Two new tests check storage reuse and retained
+handler payloads. Existing tests cover large-storage release, split status
+framing, pending-ST recovery, and nested feed/reset. Release benchmark and
+profiler builds passed.
+
+| Case | Final versus baseline, pair 1 | Pair 2 |
+| --- | ---: | ---: |
+| `hardening_osc_short_normal` | -26.87% | -26.55% |
+| `hardening_osc_short_chunked` | -7.20% | -3.93% |
+| `hardening_osc_bounded_chunked` | -18.98% | -16.51% |
+| `medium_cells` | -4.63% | -1.52% |
+| `scrolling` | -1.29% | -3.39% |
+
+The full suite includes 12 standard cases, eight hardening cases, and two
+Kitty snapshot cases. It uses `p0` wall clock and a three-second maximum
+duration per case for both builds. The repository default remains ten
+seconds. Results still vary: cursor motion was -3.07% / +2.12%, dense cells
+-2.80% / +2.64%, and Kitty 3 MiB snapshots -7.75% / +8.40%. No case exceeded
+the 1.5% limit in both final full-suite pairs.
+
+The timing tool encountered three Swift/Foundation crashes during command
+request decoding, before terminal workload execution. The failures affected
+a saved local binary and the original baseline. Final framework runs used
+`SWIFT_DEBUG_ENABLE_LIB_PRESPECIALIZED_METADATA=0` for both builds.
+[Swift's runtime source](https://github.com/swiftlang/swift/blob/main/stdlib/public/runtime/EnvironmentVariables.def)
+defines this switch. No production runtime setting was changed.
+
+A separate fixed-work check used normal runtime settings and equal work in
+both orders. Short whole OSC was 24.55% and 19.74% faster. Cursor motion and
+dense cells also improved in both pairs. Scrolling varied by +4.00% / -2.06%;
+its fixed-work results do not show a repeatable slowdown. All repetitions
+are retained.
+
+The sandbox prevented a new Instruments capture: `xctrace` reported a MAC
+policy error and could not load the Time Profiler template. Diagnosis used
+the saved October 7 traces, Release code, allocation counting, and paired
+measurements. The [measurement record](Docs/performance-osc7501-fix-2026-10-08.json)
+contains all trials, hashes, runtime conditions, incomplete runs, and raw
+fixed-work repetitions. The
+[compressed baselines](Docs/performance-osc7501-fix-2026-10-08-baselines.json.gz)
+retain full benchmark distributions, including rejected variants.
+
+### OSC 8 atom reuse (#780, #792) — 2026-10-28
+
+PR #780 lets OSC 8 links resolve in long-running hosts. A redrawn link reuses
+one atom, released `TinyAtom` codes are given out again, and automatic
+collection keeps memory bounded. Before this change, each link print used a
+new code, and the process stopped resolving links after 65,534 codes. PR #792
+contains #780 and a performance change, `e172bc57`.
+
+**Method.** No vtebench case sends OSC 8. The link cases used a fixed-work
+harness, now the `osc8_*` workloads. Each run was a new process, in
+alternating order. Cases without links used the headless suite and
+`SwiftTermProfile`, with `/usr/bin/time -l` for retired instructions and
+cycles. The default build was compared, and then a build with the same
+function alignment on both sides (see the next section).
+
+**Link cases, fixed work, against main `367958ae`:**
+
+| Case | #780 | #792 |
+| --- | ---: | ---: |
+| Same 25 links redrawn, 62,500 link prints | about -12% | about -14% |
+| New link on each line, scrollback 500 | 4.7x slower | +15% |
+| New link on each line, scrollback 10,000 | 4.9x slower | +10% |
+| New link in each cell | +55% | -8% |
+
+The remaining 10-15% on new links is the cost of releasing codes. Main does
+not release them. Main is faster there only until it runs out of codes.
+
+**Cases without links.** #780 retired 1.3-2.6% more instructions in
+`cursor_motion`, `medium_cells`, `scrolling_bottom_small_region`, and
+`hardening_ascii_seam_noop`. #792, with aligned functions on both sides:
+
+| Case | Instructions | Cycles |
+| --- | ---: | ---: |
+| `hardening_ascii_seam_noop` | -0.2% | -1.5% to -3.5% |
+| `cursor_motion` | -0.2% | +1.1% |
+| `medium_cells`, `scrolling_bottom_small_region`, `dense_cells` | at or below main | within ±1% |
+| `hardening_horizontal_margin_wide_scroll_edit`, `hardening_wide_seam_overwrite_edit` | same as main | within ±1% |
+
+In the default build, some cases read slower: `hardening_ascii_seam_noop`
++5% to +7.7%, `hardening_horizontal_margin_wide_scroll_edit` +5.8% to +7.5%,
+`hardening_wide_seam_overwrite_edit` +2.3% to +5.9%, and `dense_cells` +3% to
++3.7%. The scrolling cases were 0% to 3% faster. With aligned functions,
+these cases were equal to main. Thus the code did not cause these
+differences; function layout did. Layout differences change with unrelated
+changes.
+
+**Causes of the #780 slowdowns, and the changes in #792:**
+
+1. The collector made a `CharData` array for each line (`getData()`). This
+   was 66% of feed time for new links on each line. #792 reads payload codes
+   directly from packed cells (`forEachPayloadCode`) into a bitmap.
+2. Links were found through a `[String: TinyAtom]` dictionary. #792 uses a
+   direct-mapped cache with 1,024 slots and an FNV-1a hash over `withUTF8`.
+   A hash loop over `String.UTF8View` was slow, because it called a generic
+   witness for each byte.
+3. The larger `resolveActiveHyperlink` was no longer inlined into the print
+   path. #792 keeps an inlined `activeHyperlink == nil` check in the print
+   path, and moves the resolver out of line with `@inline(never)`.
+4. New stored properties in `Terminal` moved the offsets of hot fields. This
+   cost 4-8% cycles with the same instructions, even with aligned functions.
+   #792 puts all new state in one `PayloadState` class, in the place of the
+   old 8-byte `Set`. The layout of `Terminal` is then the same as main.
+
+The `TinyAtom` table is now an array indexed by code, not a dictionary.
+
+### Main-queue hops under the parse lock — 2026-10-30
+
+After #766 (`56ffb529`), `sync_medium_cells` in the PTY benchmark was 6-7%
+slower than its parent, `e0be0f2c`, with both renderers. The headless suite
+and RenderBench did not show the loss. The batch count did not change (about
+2,110 for each 130 MiB repetition), but each batch held the parse lock longer.
+
+**Function layout was not the cause.** #766 moved the parser in the app
+binary, but the hot parser functions had the same instructions. With
+`-align-all-functions=6` in both app builds, the commit was still +4.6% and
++5.5% slower in the two run orders.
+
+**The cause was one main-queue block for each end of synchronized output.**
+The workload ends DECSET 2026 462 times in each 185,737-byte sample, which
+is about 339,000 times in each repetition.
+`TerminalView.synchronizedOutputChanged` sent one `DispatchQueue.main.async`
+for each end, and `cursorStyleChanged` sent one for each DECSCUSR. Both builds
+sent 343,486 blocks in each repetition. #766 removed the main-actor task for
+each dirty mark, so the main thread was asleep during the flood. Each block
+then had to wake the main run loop with a Mach message, while the parse
+thread held the lock. A Time Profiler capture of the parse thread showed
+`mach_msg2_trap` under `TerminalView.onMain` at 501 ms in the parent and
+849 ms in the commit, for 12 repetitions. This was the largest change in
+self time on that thread.
+
+**The fix sends these events through `FrameDriverSignal`.** The parse thread
+records the last scroll position and the last cursor style in
+`crossThreadState`, and calls `requestViewUpdate()`. While the display link
+runs, this publishes no task; the next tick applies the values
+(`applyPendingViewUpdates`) before it draws. When the link is stopped, one
+coalesced delivery applies them, also while the view is hidden. The delegate
+receives one `scrolled` call for each delivery, with the last position, not
+one call for each end of synchronized output.
+
+Results against `main` (`2930f583`), Release, 5 pairs of 5 repetitions in
+each order. All results had frames and no `status=no_render`:
+
+| Measurement | `main` | Fix | Change |
+| --- | ---: | ---: | ---: |
+| PTY Metal, median elapsed, both orders | 1.226 / 1.217 s | 0.916 / 0.924 s | -25.5% / -24.1% |
+| PTY Core Graphics, median elapsed, both orders | 1.211 / 1.208 s | 0.906 / 0.909 s | -24.9% / -24.7% |
+| PTY main-queue hops, one repetition | 343,486 | 1,467 | -99.6% |
+| PTY parse lock hold, median for each batch | 0.582 ms | 0.446 ms | -23% |
+| RenderBench Metal, A-B-B-A, MB/s | 134.3, 134.9 | 168.6, 167.5 | about +25% |
+| RenderBench Core Graphics, A-B-B-A, MB/s | 122.8, 126.4 | 160.0, 161.7 | about +29% |
+| Headless `SwiftTermProfile`, 500 iterations, both orders | 3.181 / 3.140 s | 3.187 / 3.146 s | none |
+
+The removed cost was about 0.9 µs of parse-thread time for each block, more
+than the Mach message alone. The block allocation, the weak capture and the
+release were also on the parse thread. RenderBench also drew more frames, about
+60 fps against 54-59 fps, and all its runs settled. In the 12-case PTY suite
+(3 pairs in each order), the other cases moved by -4% to +5% with the sign
+changing between the orders. This is the layout floor.
+
+Focused tests in `FrameDriverTests` check that view updates publish no task
+while the link runs, that a tick applies them before it draws, that a
+suspended driver still applies them, and that a `TerminalView` fed 100
+synchronized frames makes no main-queue hop and calls `scrolled` once. The
+last test fails on `main`.
+
+### Separate code from function layout
+
+When a change retires the same or fewer instructions but uses more cycles,
+build both revisions with all functions aligned to 64 bytes. Use a separate
+scratch path so the normal build stays available:
+
+```bash
+cd Tools/SwiftTermBenchmarks
+swift build -c release --product SwiftTermProfile --scratch-path .build-al \
+    -Xswiftc -Xllvm -Xswiftc -align-all-functions=6
+/usr/bin/time -l .build-al/release/SwiftTermProfile cursor_motion --iterations 800
+```
+
+Compare `instructions retired` and `cycles elapsed` from `/usr/bin/time -l`,
+in both run orders. If the cycle difference goes away with aligned
+functions, function layout caused it. If cycles are still higher with the
+same instructions, look at data layout, for example new fields in `Terminal`.
 
 The older manually timed cases remain in
 `Tests/SwiftTermTests/PerformanceTest.swift` for focused experiments. Use the
-nested benchmark package for repeatable A/B measurements.
+nested benchmark package for repeatable A/B measurements. In that file,
+`repeatBigBlob` is the `medium_cells` shape, where row recycling costs about
+1 ms. Do not use it for scroll or BiDi work. Use `testPerformance2` for the
+scroll path.
 
 For a fixed-work, headless Time Profiler capture, use the direct executable:
 
@@ -192,7 +489,9 @@ threads only. Such a capture cannot measure blocked time or lock contention.
 ---------------------
 
 For end-to-end numbers over a real PTY, build the sample app in Release
-(Debug builds SwiftTerm at `-Onone` and exaggerates Swift-level costs):
+(Debug builds SwiftTerm at `-Onone` and exaggerates Swift-level costs, and
+skips the row-walking invariant checks unless `SWIFTTERM_EXPENSIVE_ASSERTS=1`
+is set):
 
 ```bash
 cd TerminalApp
@@ -208,8 +507,12 @@ SWIFTTERM_PROFILE_STATS=1 \
 SWIFTTERM_BASELINE=all \
 SWIFTTERM_BASELINE_REPEAT=5 \
 SWIFTTERM_BASELINE_LABEL=A \
+SWIFTTERM_BASELINE_TIMEOUT=60 \
 "$APP"
 ```
+
+`SWIFTTERM_BASELINE_TIMEOUT` is the number of seconds the harness waits for
+one case before it reports a timeout. The driver accepts the same value.
 
 `all` runs the 12 shared vtebench workloads. You can also specify one workload
 name, such as `unicode`, or a legacy case: `flood`, `bidi`, `tui`, or `binary`.
@@ -236,7 +539,13 @@ Tools/run-pty-benchmark.py \
 ```
 
 The driver alternates A and B. It rebuilds and relaunches each app. It prints a
-`PTYBENCH_DELTA` line for each paired result.
+`PTYBENCH_DELTA` line for each paired result. Inside each pair, A always runs
+before B. Run the driver a second time with the trees swapped to get the
+reverse order. Wrap the driver in `caffeinate -dius`. If the display sleeps,
+the rest of the run is discarded without an error.
+
+For a lock change, read `lock_wait_parse_total` and `frame_refresh_p99`, not
+`mb_s`. A change that cut the refresh tail 15x moved `mb_s` by less than 2%.
 
 Each `PTYBENCH` line carries the build's Mach-O `uuid=`. Two lines with
 different UUIDs come from different builds, which is the same hazard as
@@ -271,16 +580,30 @@ Choosing the right instrument
 Each level answers a different question. Using the wrong one is the most common
 way to get a confident wrong answer.
 
-| Change you are making | Instrument | Metric |
-| --- | --- | --- |
-| Parser, buffer, or anything per-byte | Headless suite (1) | `p0` wall clock |
-| Lock, threading, or *when* work runs | PTY benchmark (3) | `lock_wait_parse_total`, `frame_refresh_p99` |
-| Render path | RenderBench (2) | MB/s |
+| Change you are making | Instrument | Metric | Noise floor |
+| --- | --- | --- | ---: |
+| Parser, buffer, or anything per-byte | Headless suite (1) | `p0` wall clock | ~1.5% |
+| Hardware work behind a wall-clock change | CPU Counters + `SwiftTermProfile` (1) | total cycles | repeat and pair |
+| Lock, threading, or *when* work runs | PTY benchmark (3) | `lock_wait_parse_total`, `frame_refresh_p99` | ~1.5-2.5%; ~1% on cases of 3 s or more |
+| Render path | RenderBench (2) | MB/s | ~0.6% |
+| Quick scroll-path sanity check | `swift test -c release --filter testPerformance2` | elapsed | 0.3% quiet, 8% loaded |
+
+Use `p0` from the headless suite. It is the least contaminated by scheduling.
+The `p25` and `p50` columns vary by 3-6% between identical runs. Do not use
+them for an A/B decision.
 
 The headless suite sees the whole engine range. RenderBench feeds from
 `DispatchQueue.main.async`, so nothing contends for `terminalLock` and it
-cannot measure lock work at all. The PTY benchmark is the only level with the
-shipping thread topology.
+cannot measure lock work at all. It once reported -3.8% for a change that the
+PTY benchmark measured as halving parse-thread blocking. Both results were
+correct for what each instrument sees. The PTY benchmark is the only level
+with the shipping thread topology.
+
+A time-boxed workload cannot show a throughput win in a trace. The RenderBench
+vtebench phases run for a fixed duration, so three builds with large engine
+differences produced phase durations of 3.011, 3.023, 9.193, and 15.294 s
+against 3.008, 3.018, 9.260, and 15.371 s. Use the fixed-work
+`SwiftTermProfile` executable when elapsed time is the result you need.
 
 CPU profile reference
 ---------------------
@@ -344,6 +667,16 @@ Do not add these percentages together. The measurements used different
 baselines, and absolute performance changed between sessions. Use the results
 to select cases for a new paired A/B test.
 
+The ARC gains above came from side tables, which change the cost of every
+retain and release on the object. Later work on individual retain and release
+pairs did not repeat them. Removing all 59 ARC call sites from
+`Terminal.scroll` changed throughput by nothing on an instrument that resolves
+1%. `unowned(unsafe)` on a local that is used many times is worse than a plain
+`let`: a reduced case emitted 2 retains and 4 releases against 1 and 1.
+`Unmanaged._withUnsafeGuaranteedRef` removes a pair where `unowned(unsafe)` and
+`withExtendedLifetime` do not. Do not start new ARC work from a sampled
+profile. The remaining 33% needs a counting measurement first.
+
 The high-water-mark result also corrected an earlier assumption. A vectorized
 fill did not improve a 5,000-row scrollback ring. The clear was limited by
 memory bandwidth. Reducing the number of cleared cells produced the gain.
@@ -397,7 +730,20 @@ Methodology notes
   state, display state, background load). Run main and the branch back to
   back in the same block, and re-run any surprising result before believing
   it — a transient machine state can halve one configuration's numbers for
-  minutes at a time while others look normal.
+  minutes at a time while others look normal. Identical code drifted from
+  13.8 to 18.6 calls/s inside one session, and a comparison six hours apart
+  produced a phantom 4% regression that a paired run reversed.
+- **Reverse the order at least once.** If A always runs first, a machine that
+  warms up favors B. Run A then B, and B then A. A real effect survives both.
+- **Report every repetition, never a mean.** The spread shows whether the
+  machine was quiet. One 4.350 s sample against a 3.43-3.58 s population is
+  visible only in the raw values.
+- **Prefer fixed work.** With a byte budget, elapsed time is the result. A
+  derived rate adds denominator noise.
+- **Run the tests before the benchmark.** An untested variant can report an
+  implausible win. A batching loop that stored 8 cells but advanced 16
+  reported -30% because it wrote half of each row. The focused tests catch
+  this in seconds.
 - **Interpret cat/PTY timings carefully.** `time cat file` inside a terminal
   measures how fast the terminal drains the PTY; payloads under a few MB fit
   in kernel buffering and undercount. Use payloads of 10 MB+.
@@ -441,3 +787,161 @@ Methodology notes
   slower; `arabic` when BiDi paragraph analysis, shaping, or font fallback
   gets slower. A change that only moves `arabic` costs RTL users only; a
   change that moves `dense`/`scroll` costs everyone.
+
+Traps
+-----
+
+Each of these cost about a day to learn. The second column is the sign that
+you are in the trap.
+
+| Trap | Tell |
+| --- | --- |
+| Time-boxed workload | Phase durations are identical across very different builds. |
+| Unsymbolicated trace | Leaf frames are hex. Compare the recorded image UUID with the on-disk binary before you use `atos`. If they differ, symbols land on neighboring functions and read as plausible nonsense. |
+| Instruments caller attribution | Instruments credits inlined records to the callee. It blamed `getCyclicIndex` for 173 ms that belonged to `recycle`. Use return-address histograms instead. |
+| `otool -tvV` on a `.o` file | Calls print as `bl 0x4c` with no symbol. A grep for `swift_beginAccess` returns zero and means nothing. Use `otool -rv` to read the relocations. |
+| `swift demangle` output | Long names wrap onto a second line, so "find the label, count to the next" attributes samples to the wrong function. Attribute by address against a sorted `nm -n`. |
+| Reduced test cases | They often do not reproduce whole-module optimizer behavior. Four variants of an exclusivity repro emitted zero `begin_access` while the real module emitted 436. Read the module's SIL. |
+| Two instruments disagree on one case | Check that case's own historical variance before you believe either. `sync_medium_cells` read +9.9% worse in vtebench, but that case spans 12.3% across six builds that barely touched it. Three paired runs put it at +1.0%. A case with a flat history that steps once is the shape of a real signal. |
+| Moving memoized work | This can turn O(paragraph) into O(rows x paragraph). The first BiDi deferral was slower than the baseline until the rows of one paragraph shared a job. |
+| Window not visible | Render metrics silently read zero. One workload gave 1295, 1635, 270, 1215, and 1169 frames across "identical" runs. Check for `status=no_render`. |
+| Stale binary measures a perfect null | `swift build --product SwiftTermProfile` from the repo root fails because it needs `--package-path Tools/SwiftTermBenchmarks`, and a piped `tail` hides the error. The old binary then A/Bs at 0.0%. Confirm the variant's code is in the binary before you trust a null, for example with `otool -tv` and a grep for the loop shape. |
+| Layout-sensitive SIMD loop | The result differs between a standalone launch and an Instruments launch, or moves with the size of an unrelated environment variable. Confirm with `/usr/bin/time -l`: fewer instructions retired but more cycles is a stall, not less work. Every NEON form of the packed ASCII writer lost 7-20% on rows rewritten in place. |
+| PTY driver order bias and layout floor | The driver always runs A then B in a pair. Swap the trees for the reverse direction. Even then the comparison has a layout floor of about 2%: `cursor_motion`, an untouched path at 0.0% headless, read +2.0% in both orders. Judge small engine deltas with the headless suite. |
+| Function layout in the default build | A case reads 3-8% slower with the same or fewer instructions retired, in both orders. For #792, these differences went away when both sides used `-align-all-functions=6`. See "Separate code from function layout". |
+| New stored properties in `Terminal` | Cycles go up 4-8% with the same instructions, even with aligned functions. New fields move the offsets of hot fields after them. Put the new state behind one reference in the place of an existing field of the same size. |
+| Main-queue hops get more expensive when the main thread is idle | A change that removes main-thread work makes a PTY case slower. Parse lock hold rises, the batch count does not change, and the parser code is the same. The parse thread shows `mach_msg2_trap` under `TerminalView.onMain`. `dispatch_async` to an empty main queue must wake the run loop. Do not send one block for each terminal event; record the state and use `FrameDriverSignal.requestViewUpdate()`. |
+| Benchmark filter is a regular expression | The filter must match the whole name. `--filter osc8_` or `--filter hardening_` selects no case and prints an empty result. Use `--filter 'osc8_.*'`. |
+| Run out of link codes | Before #780, OSC 8 code stops resolving links after 65,534 link prints. It then prints plain text and is faster. The `osc8_*` link check stops the run in this condition. |
+
+Profiling recipes
+-----------------
+
+### Profile the PTY benchmark app
+
+`xctrace record --launch` starts MacTerminal, but the app cannot start its
+shell, and every case times out. Start the app normally and attach to its
+process. Run `caffeinate` as a separate process: if you attach to
+`caffeinate -dius "$APP"`, the trace records `caffeinate`.
+
+```bash
+caffeinate -dius & CAF=$!
+SWIFTTERM_PROFILE_STATS=1 SWIFTTERM_BASELINE=sync_medium_cells \
+SWIFTTERM_BASELINE_REPEAT=12 SWIFTTERM_BASELINE_TIMEOUT=60 \
+SWIFTTERM_METAL=1 "$APP" > /tmp/app.out 2>&1 & APPPID=$!
+xcrun xctrace record --template 'Time Profiler' --output /tmp/pty.trace \
+    --attach $APPPID
+wait $APPPID; kill $CAF
+```
+
+The trace stops when the app exits. Export the `time-profile` table and
+compare the `swiftterm-io-reader` thread, which parses, between the two
+builds. The `swiftterm-io-gather` thread reads the PTY. Each frame element is
+a direct child of `tagged-backtrace`. Compare self time for each function, then
+group the callers of the largest change. With `SWIFTTERM_PROFILE_STATS=1`,
+the report also shows "Main-queue hops by callback". A large count there,
+compared with frames, is a cost on the parse thread.
+
+### Find the run in a trace
+
+```bash
+xcrun xctrace export --input ~/capture.trace --toc
+xcrun xctrace export --input ~/capture.trace \
+    --xpath '/trace-toc/run[@number="N"]/data/table[@schema="time-profile"]' \
+    --output /tmp/run.xml
+```
+
+Run numbers in the table of contents differ from the `TraceN.run` directory
+numbers. A run is missing from the table of contents until Instruments saves
+the document. The `TraceN.run` directory on disk is not enough.
+
+### Attribute a runtime call to its real caller
+
+Instruments credits inlined frames to the callee. To find the real caller of
+`swift_retain` or `swift_beginAccess`, make a histogram of the return address
+in the frame above each sample. Subtract the slide, which is `load-addr` minus
+`0x100000000`, and pass the result to `atos`. Then read the instruction before
+the return address to see which object or field was passed.
+
+To map an offset to a field name, use the `direct field offset for
+<Type>.<field>` symbols in `__TEXT __const`. List them with `nm -m` and
+`swift demangle`, convert the symbol address to a file offset with the
+section's `addr` and `offset` from `otool -l`, and read the 8-byte value.
+
+### Find exclusivity checks
+
+```bash
+swiftc -O -wmo -emit-sil -module-name SwiftTerm \
+    $(find Sources/SwiftTerm -name '*.swift') \
+    .build/plugins/outputs/swiftterm/SwiftTerm/destination/SwiftTermBuildInfoPlugin/Generated/SwiftTermBuildInfo.swift \
+    -o /tmp/st.sil
+```
+
+Pair each `ref_element_addr ..., #Type.field` with the `begin_access` that
+uses it. A `[static]` access is free. A `[dynamic]` access is a runtime call.
+Count the call sites in the built module:
+
+```bash
+otool -rv .build/release/SwiftTerm.o | grep -c _swift_beginAccess
+```
+
+An access stays `[dynamic]` when the optimizer cannot prove that no nested
+conflict occurs inside its scope. The whole-module pass promotes a storage
+location only when every access to it in the module carries
+`[no_nested_conflict]`. One unprovable site keeps the field dynamic
+everywhere. Access level is not the rule: `CircularBufferLineList` had five
+fields that were fully static and one field, `array`, with 436 dynamic
+accesses, in the same internal class with the same private declarations.
+
+`@exclusivity(unchecked)` is the fix. Guard it so that Debug builds keep the
+check:
+
+```swift
+#if DEBUG
+    private var array: [BufferLine?]
+#else
+    @exclusivity(unchecked) private var array: [BufferLine?]
+#endif
+```
+
+Removing the three existing `@exclusivity(unchecked)` attributes costs about
+3%, four runs out of four. Use that as the known change when you calibrate an
+instrument.
+
+### Keep a fixed field layout
+
+A stored field of a resilient type from another module (`URL`, `Date`,
+`UUID`, `Locale`, ...) gives the containing type a field layout that is known
+only at run time. The field can be in the type itself or in a struct that the
+type stores. Then each access to each field of the type loads the field offset
+first. One `URL` field in `KittyGraphicsConfiguration`, which `Terminal`
+stores, cost 8% more instructions on the scrolling benchmark. Commit 17e6c5e8
+put that field behind a final class box.
+
+The compiler emits a `type metadata completion function` for each type with a
+run-time layout. CI runs this check on the release build:
+
+```bash
+scripts/check-fixed-layout.sh
+```
+
+It fails if `Terminal`, `TerminalOptions`, `Buffer`, `BufferLine`,
+`CircularBufferLineList`, `CellStoragePage`, or `CellArena` has a run-time
+layout. To check other types, add them to `FIXED_TYPES` in the script. To
+see all the types that have a run-time layout:
+
+```bash
+nm .build/release/SwiftTerm.o | xcrun swift-demangle \
+    | grep 'type metadata completion function for SwiftTerm\.'
+```
+
+Generic types (`CircularList`) and the view classes are in that list. That is
+expected and does not change the parse path.
+
+Campaign history
+----------------
+
+The chronological record of each performance batch, with the specification,
+the measured outcome, and the rejected ideas, lives in the `ioSwiftTerm`
+checkout under `docs/`. Read `docs/performance-guidelines.md` there before you
+repeat an experiment. It lists the negative results and the open items.

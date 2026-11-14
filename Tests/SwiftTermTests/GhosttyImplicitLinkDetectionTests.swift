@@ -45,6 +45,31 @@ final class GhosttyImplicitLinkDetectionTests: TerminalDelegate {
         }
     }
 
+    /// A line wrapped over thousands of rows and full of links finds the
+    /// hovered one in a pass over the line: measuring every match from the
+    /// line's start made the lookup quadratic, twice for each mouse move
+    /// while Command is down.
+    @Test func testImplicitLinkInALongLineOfLinks() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 24, scrollback: 10_000))
+        let rows = 2_000
+        // Five 16-character links a row.
+        terminal.feed(text: (0..<5 * rows).map { "https://ex.io/\($0 % 10) " }.joined())
+
+        terminal.terminalLock.withLock {
+#if DEBUG
+            let candidatesBefore = terminal.testingImplicitLinkCandidates
+#endif
+            let middle = terminal.link(at: .buffer(Position(col: 2, row: rows / 2)), mode: .explicitAndImplicit)
+            let last = terminal.link(at: .buffer(Position(col: 66, row: rows - 1)), mode: .explicitAndImplicit)
+            #expect(middle == "https://ex.io/0")
+            #expect(last == "https://ex.io/9")
+#if DEBUG
+            let candidates = terminal.testingImplicitLinkCandidates - candidatesBefore
+            #expect(candidates == 2)
+#endif
+        }
+    }
+
     @Test func testGhosttyStyleImplicitPositiveCases() {
         let cases: [(String, String)] = [
             ("hello https://example.com world", "https://example.com"),
@@ -92,6 +117,25 @@ final class GhosttyImplicitLinkDetectionTests: TerminalDelegate {
             ("2024/report.txt", "2024/report.txt"),
             ("./spaces-end.   ", "./spaces-end.   "),
             ("./space middle", "./space middle")
+        ]
+
+        for (input, expected) in cases {
+            assertImplicitMatch(input: input, expected: expected)
+        }
+    }
+
+    // A space segment must not continue into a word that starts a new path,
+    // matching Ghostty's `(?!\.{0,2}\/)(?!~\/)` lookaheads.
+    @Test func testAdjacentPathsAreSeparateMatches() {
+        let cases: [(String, String)] = [
+            ("cp /a/b ./c/d", "/a/b"),
+            ("cp /a/b ./c/d", "./c/d"),
+            ("cp /a/b ../c/d", "../c/d"),
+            ("mv ~/x/y ~/z/w", "~/x/y"),
+            ("mv ~/x/y ~/z/w", "~/z/w"),
+            ("diff /tmp/a.txt /tmp/b.txt", "/tmp/a.txt"),
+            ("diff /tmp/a.txt /tmp/b.txt", "/tmp/b.txt"),
+            ("/tmp/test folder/file.txt", "/tmp/test folder/file.txt")
         ]
 
         for (input, expected) in cases {

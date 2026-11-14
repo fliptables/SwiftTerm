@@ -9,16 +9,22 @@
 //  The snapshot copies the model instead of re-deriving it from bytes: both
 //  buffers with every line, wrap flag, cell, grapheme, hyperlink and semantic
 //  mark; the cursor, saved cursors, margins and tab stops; every mode; the
-//  Kitty keyboard stacks; titles and their stacks; and the bytes of any
-//  sequence the parser has only partly read.
+//  Kitty keyboard stacks; titles and their stacks; the colours an application
+//  set with OSC 10, 11 and 12; and the program status records. It is taken
+//  only at ground, so no parser state travels.
+//
+//  Which fields: the census (ReplicationCensusTests). A field is carried when
+//  a reader of the replica can observe it: what is drawn, what the next byte
+//  does, what a query would answer, what a key at the viewer sends.
 //
 //  What it does not carry, by design (each is listed in `notCarried`):
 //  - Kitty graphics and sixel images: declared lost until the application
-//    redraws.
+//    redraws. An import clears the importer's images.
 //  - Host configuration the importing view owns: the installed palette and
-//    default colours, the options it was created with (only the cursor style,
-//    which an application changes, is carried), selection, scroll position
-//    chosen by the user, focus, visibility and pixel geometry.
+//    default colours (an OSC colour is installed over the importer's own), the
+//    options it was created with (only the cursor style, which an application
+//    changes, is carried), selection, scroll position chosen by the user,
+//    focus, visibility and pixel geometry.
 //  - Input-side state: the OSC 133 input scanner and clipboard transactions.
 //  - A cell payload that is not a `String` (hyperlinks are strings).
 //
@@ -31,8 +37,15 @@ import Foundation
 /// A terminal's emulator state, exported by ``Terminal/exportState()`` and
 /// applied by ``Terminal/importState(_:)``.
 public struct TerminalStateSnapshot: Equatable, Sendable {
-    /// The version of ``encoded()``. A decoder refuses any other.
-    public static let formatVersion: UInt32 = 1
+    /// The version of ``encoded()`` and of ``TerminalHistoryChunk/encoded()``
+    /// (one constant for both). A decoder refuses any other, version 1 included.
+    public static let formatVersion: UInt32 = 2
+    /// Decode's memory bounds. A host must keep scrollback ≤ `maximumScrollback` and
+    /// (scrollback + rows) × cols, plus the alternate screen's rows × cols, ≤ `maximumCells`;
+    /// beyond either, its snapshots fail to decode (an error, never a crash).
+    public static let maximumScrollback = 1 << 24
+    /// See ``maximumScrollback``: the cells of both buffers' lines together (8 bytes each).
+    public static let maximumCells = 1 << 26
     static let magic: [UInt8] = Array("STSS".utf8)
 
     /// The categories of state the snapshot deliberately leaves out.
@@ -58,9 +71,6 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
     public var rows: Int { modes.rows }
     /// Whether the alternate screen was active.
     public var alternateScreenActive: Bool { modes.altActive }
-    /// Bytes of a sequence the parser had only partly read. The importer feeds
-    /// them last, so its parser resumes in the same state.
-    public internal(set) var pendingParserBytes: [UInt8]
     /// Cells whose payload was dropped because it was not a `String`.
     public internal(set) var droppedPayloadCount: Int
 }
@@ -69,6 +79,11 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
 
 struct RGB16: Equatable, Sendable {
     var red: UInt16, green: UInt16, blue: UInt16
+}
+
+extension RGB16 {
+    init(_ color: Color) { self.init(red: color.red, green: color.green, blue: color.blue) }
+    var color: Color { Color(red: red, green: green, blue: blue) }
 }
 
 struct KittyKeyboardImage: Equatable, Sendable {
@@ -86,7 +101,6 @@ struct TerminalModesImage: Equatable, Sendable {
     var cols: Int
     var rows: Int
     var altActive: Bool
-    var tabStopWidth: Int
     var cursorStyle: CursorStyle
     var synchronizedOutputActive: Bool
     var applicationKeypad: Bool
@@ -109,7 +123,6 @@ struct TerminalModesImage: Equatable, Sendable {
     var colorSchemeIsLight: Bool
     var charset: [UInt8: String]?
     var gCharsets: [[UInt8: String]?]
-    var gcharset: Int
     var reverseWraparound: Bool
     var currentAttribute: Attribute
     var gLevel: UInt8
@@ -138,6 +151,25 @@ struct TerminalModesImage: Equatable, Sendable {
     var visibilityReportsEnabled: Bool
     var inBandSizeReportsEnabled: Bool
     var kittyPasteEventsEnabled: Bool
+    // Format v2
+    var cursorStartsNewGrapheme: Bool
+    var keyboardActionMode: Bool
+    var sendReceiveMode: Bool
+    var backarrowKeyMode: Bool
+    /// `Terminal.CharacterProtectionMode`: 0 off, 1 dec, 2 iso.
+    var characterProtectionMode: UInt8
+    var characterProtection: Bool
+    var reverseWraparoundExtended: Bool
+    var noClearOnColumnChange: Bool
+    var reportedDECModes: [Int]
+    var attributeChangeExtent: Int
+    var moreFix: Bool
+    /// The colours set by OSC 10, 11 and 12, without the host colour under them.
+    var oscForeground: RGB16?
+    var oscBackground: RGB16?
+    var cursorColor: RGB16?
+    /// Oldest update first.
+    var programStatus: [TerminalProgramStatus]
 }
 
 struct CellImage: Equatable, Sendable {
@@ -179,8 +211,6 @@ struct BufferImage: Equatable, Sendable {
     var y: Int
     var yBase: Int
     var yDisp: Int
-    var xDisp: Int
-    var xBase: Int
     var linesTop: Int
     var scrollTop: Int
     var scrollBottom: Int
@@ -191,13 +221,16 @@ struct BufferImage: Equatable, Sendable {
     var savedY: Int
     var savedOriginMode: Bool
     var savedMarginMode: Bool
-    var savedWraparound: Bool
-    var savedReverseWraparound: Bool
+    var savedCharacterProtection: Bool
+    var savedPendingWrap: Bool
     var savedAttr: Attribute
     var savedCharset: [UInt8: String]?
     var insertMode: Bool
     var marginMode: Bool
     var wraparound: Bool
+    var characterProtection: Bool
+    /// Restored last: a cursor move clears it.
+    var pendingWrap: Bool
     var semanticContent: SemanticContent
     var semanticInput: SemanticInputState
     var semanticClickMode: SemanticPromptClickMode
@@ -235,16 +268,22 @@ extension Terminal.TerminalConformance: Equatable {}
 
 extension Terminal {
     /// Exports the emulator state. Call under `terminalLock`, between feeds.
-    public func exportState() -> TerminalStateSnapshot {
+    ///
+    /// Returns `nil`, reading and changing nothing, while
+    /// ``hasPendingSequence`` is true: the parser is inside a sequence, or a
+    /// UTF-8 character is cut, and a snapshot taken now would put a replica's
+    /// parser in ground. The caller must wait; the next feed that returns the
+    /// parser to ground ends the wait.
+    public func exportState() -> TerminalStateSnapshot? {
         exportState(skippingHistory: false)
     }
 
-    func exportState(skippingHistory: Bool) -> TerminalStateSnapshot {
+    func exportState(skippingHistory: Bool) -> TerminalStateSnapshot? {
+        guard !hasPendingSequence else { return nil }
         var dropped = 0
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
             altActive: isCurrentBufferAlternate,
-            tabStopWidth: replicationTabStopWidth,
             cursorStyle: options.cursorStyle,
             synchronizedOutputActive: synchronizedOutputActive,
             applicationKeypad: replicationApplicationKeypad,
@@ -269,7 +308,6 @@ extension Terminal {
             colorSchemeIsLight: colorScheme == .light,
             charset: replicationCharset,
             gCharsets: replicationGCharsets,
-            gcharset: replicationGCharset,
             reverseWraparound: replicationReverseWraparound,
             currentAttribute: currentAttribute,
             gLevel: replicationGLevel,
@@ -296,12 +334,26 @@ extension Terminal {
             terminalIconStack: replicationTerminalIconStack,
             visibilityReportsEnabled: visibilityReportsEnabled,
             inBandSizeReportsEnabled: inBandSizeReportsEnabled,
-            kittyPasteEventsEnabled: kittyPasteEventsEnabled)
+            kittyPasteEventsEnabled: kittyPasteEventsEnabled,
+            cursorStartsNewGrapheme: replicationCursorStartsNewGrapheme,
+            keyboardActionMode: replicationKeyboardActionMode,
+            sendReceiveMode: replicationSendReceiveMode,
+            backarrowKeyMode: replicationBackarrowKeyMode,
+            characterProtectionMode: replicationCharacterProtectionModeCode,
+            characterProtection: replicationCharacterProtection,
+            reverseWraparoundExtended: replicationReverseWraparoundExtended,
+            noClearOnColumnChange: replicationNoClearOnColumnChange,
+            reportedDECModes: replicationReportedDECModes.sorted(),
+            attributeChangeExtent: replicationAttributeChangeExtent,
+            moreFix: replicationMoreFix,
+            oscForeground: replicationOscForeground.map(RGB16.init),
+            oscBackground: replicationOscBackground.map(RGB16.init),
+            cursorColor: cursorColor.map(RGB16.init),
+            programStatus: replicationProgramStatusRecords)
         let normalImage = Terminal.bufferImage(replicationNormalBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         let altImage = Terminal.bufferImage(replicationAltBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
-            pendingParserBytes: pendingParserBytes ?? [],
             droppedPayloadCount: dropped)
     }
 
@@ -318,7 +370,7 @@ extension Terminal {
     }
 
     private func activeHyperlinkImage() -> HyperlinkImage {
-        switch replicationActiveHyperlinkTarget {
+        switch replicationActiveHyperlinkTarget(missingTarget: "") {
         case nil: return .none
         case .some(.some(let target)): return .open(target)
         case .some(nil): return .unavailable
@@ -326,7 +378,10 @@ extension Terminal {
     }
 
     static func bufferImage(_ buffer: Buffer, dropped: inout Int, skippingHistory: Bool = false) -> BufferImage {
-        let history = skippingHistory ? min(buffer.replicationYBase, buffer.replicationLines.count) : 0
+        // History streams only for a buffer with scrollback; the alternate buffer's few lines
+        // above yBase go whole in the screen part.
+        let history = skippingHistory && buffer.replicationHasScrollback
+            ? min(buffer.replicationYBase, buffer.replicationLines.count) : 0
         var lines: [LineImage] = []
         lines.reserveCapacity(buffer.replicationLines.count - history)
         for index in history..<buffer.replicationLines.count {
@@ -342,18 +397,20 @@ extension Terminal {
             pendingHistoryLines: history,
             lines: lines,
             x: buffer.x, y: buffer.y, yBase: buffer.replicationYBase - history, yDisp: max(0, buffer.yDisp - history),
-            xDisp: buffer.replicationXDisp, xBase: buffer.replicationXBase, linesTop: buffer.replicationLinesTop,
+            linesTop: buffer.replicationLinesTop,
             scrollTop: buffer.scrollTop, scrollBottom: buffer.scrollBottom,
             marginLeft: buffer.marginLeft, marginRight: buffer.marginRight,
             tabStops: buffer.replicationTabStops,
             savedX: buffer.savedX, savedY: buffer.savedY,
             savedOriginMode: buffer.replicationSavedOriginMode,
             savedMarginMode: buffer.replicationSavedMarginMode,
-            savedWraparound: buffer.replicationSavedWraparound,
-            savedReverseWraparound: buffer.replicationSavedReverseWraparound,
+            savedCharacterProtection: buffer.replicationSavedCharacterProtection,
+            savedPendingWrap: buffer.replicationSavedPendingWrap,
             savedAttr: buffer.savedAttr, savedCharset: buffer.savedCharset,
             insertMode: buffer.replicationInsertMode, marginMode: buffer.replicationMarginMode,
             wraparound: buffer.replicationWraparound,
+            characterProtection: buffer.replicationCharacterProtection,
+            pendingWrap: buffer.replicationPendingWrap,
             semanticContent: buffer.replicationSemanticContent,
             semanticInput: buffer.replicationSemanticInput,
             semanticClickMode: buffer.replicationSemanticClickMode,
@@ -396,19 +453,30 @@ extension Terminal {
 // MARK: - Import
 
 extension Terminal {
-    /// Replaces this terminal's emulator state with `snapshot`, then feeds the
-    /// snapshot's pending parser bytes. Call under `terminalLock`, on a
-    /// terminal whose options match the exporter's (scrollback, palette
-    /// strategy). A replica sets ``respondsToQueries`` to `false` first.
+    /// Replaces this terminal's emulator state with `snapshot`. Call under
+    /// `terminalLock`, on a terminal whose palette strategy matches the
+    /// exporter's; the buffers are rebuilt with the exporter's scrollback, whatever
+    /// this terminal's options say. A replica sets ``respondsToQueries`` to
+    /// `false` first.
+    ///
+    /// The importer's images are cleared (images are not carried), and the
+    /// colours an application set with OSC 10, 11 and 12 are installed over the
+    /// importer's own host colours, telling the delegate as those sequences do.
+    /// `cursorColor` is carried as set: a host that writes it directly (not
+    /// through the view's caret colour) loses that value at import.
+    /// Delegate notifications during import (program status, the three colours)
+    /// see the new modes and buffers; the screen is refreshed after.
     public func importState(_ snapshot: TerminalStateSnapshot) {
         let modes = snapshot.modes
         var payloads: [String: TinyAtom] = [:]
+
+        // Upstream's own clear, as RIS does: nothing stale is drawn over the import.
+        replicationClearImages()
 
         replicationCols = modes.cols
         replicationRows = modes.rows
         options.cols = modes.cols
         options.rows = modes.rows
-        replicationTabStopWidth = modes.tabStopWidth
 
         let normal = makeBuffer(snapshot.normal, payloads: &payloads)
         let alt = makeBuffer(snapshot.alt, payloads: &payloads)
@@ -442,7 +510,6 @@ extension Terminal {
         replicationColorScheme = modes.colorSchemeIsLight ? .light : .dark
         replicationCharset = modes.charset
         replicationGCharsets = modes.gCharsets
-        replicationGCharset = modes.gcharset
         replicationReverseWraparound = modes.reverseWraparound
         replicationSetCurrentAttribute(modes.currentAttribute)
         replicationGLevel = modes.gLevel
@@ -479,6 +546,18 @@ extension Terminal {
         replicationVisibilityReportsEnabled = modes.visibilityReportsEnabled
         replicationInBandSizeReportsEnabled = modes.inBandSizeReportsEnabled
         replicationKittyPasteEventsEnabled = modes.kittyPasteEventsEnabled
+        replicationKeyboardActionMode = modes.keyboardActionMode
+        replicationSendReceiveMode = modes.sendReceiveMode
+        replicationBackarrowKeyMode = modes.backarrowKeyMode
+        replicationCharacterProtectionModeCode = modes.characterProtectionMode
+        // The flag only: each buffer's own protection is restored with the buffer.
+        replicationCharacterProtection = modes.characterProtection
+        replicationReverseWraparoundExtended = modes.reverseWraparoundExtended
+        replicationNoClearOnColumnChange = modes.noClearOnColumnChange
+        replicationReportedDECModes = Set(modes.reportedDECModes)
+        replicationAttributeChangeExtent = modes.attributeChangeExtent
+        replicationMoreFix = modes.moreFix
+        replicationSetProgramStatusRecords(modes.programStatus)
 
         replicationResetParser()
         if modes.synchronizedOutputActive {
@@ -486,15 +565,18 @@ extension Terminal {
         } else if synchronizedOutputActive {
             replicationEndSynchronizedOutput()
         }
-        if !snapshot.pendingParserBytes.isEmpty {
-            feed(byteArray: snapshot.pendingParserBytes)
-        }
+        replicationSetOscColors(foreground: modes.oscForeground?.color, background: modes.oscBackground?.color,
+                                cursor: modes.cursorColor?.color)
+        replicationCursorStartsNewGrapheme = modes.cursorStartsNewGrapheme
+        // Last: anything that moves the cursor clears it.
+        normal.replicationPendingWrap = snapshot.normal.pendingWrap
+        alt.replicationPendingWrap = snapshot.alt.pendingWrap
         refresh(startRow: 0, endRow: rows - 1)
         replicationNotifyBufferActivated()
     }
 
     private func makeBuffer(_ image: BufferImage, payloads: inout [String: TinyAtom]) -> Buffer {
-        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabStopWidth: replicationTabStopWidth,
+        let buffer = Buffer.replicationMake(cols: image.cols, rows: image.rows, tabWidth: replicationTabStopWidth,
                                             scrollback: image.scrollback, bidiState: image.defaultBidiState,
                                             arena: replicationCellArena)
         buffer.replicationTerminal = self
@@ -508,8 +590,6 @@ extension Terminal {
         buffer.y = image.y
         buffer.replicationYBase = image.yBase
         buffer.yDisp = image.yDisp
-        buffer.replicationXDisp = image.xDisp
-        buffer.replicationXBase = image.xBase
         buffer.replicationLinesTop = image.linesTop
         buffer.scrollTop = image.scrollTop
         buffer.scrollBottom = image.scrollBottom
@@ -520,13 +600,14 @@ extension Terminal {
         buffer.savedY = image.savedY
         buffer.replicationSavedOriginMode = image.savedOriginMode
         buffer.replicationSavedMarginMode = image.savedMarginMode
-        buffer.replicationSavedWraparound = image.savedWraparound
-        buffer.replicationSavedReverseWraparound = image.savedReverseWraparound
+        buffer.replicationSavedCharacterProtection = image.savedCharacterProtection
+        buffer.replicationSavedPendingWrap = image.savedPendingWrap
         buffer.savedAttr = image.savedAttr
         buffer.savedCharset = image.savedCharset
         buffer.replicationSetInsertMode(image.insertMode)
         buffer.replicationSetMarginMode(image.marginMode)
         buffer.replicationSetWraparound(image.wraparound)
+        buffer.replicationSetCharacterProtection(image.characterProtection)
         buffer.replicationSemanticContent = image.semanticContent
         buffer.replicationSemanticInput = image.semanticInput
         buffer.replicationSemanticClickMode = image.semanticClickMode

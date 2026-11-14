@@ -49,7 +49,9 @@ final class TerminalStateSnapshotTests {
     }
 
     /// Returns the first failing cut, or nil.
-    static func replicate(_ steps: [Step]) -> String? {
+    /// `atEqualSnapshot` sees the owner at every cut whose import gave an equal digest
+    /// (the census's coverage test collects the fields the corpus exercises there).
+    static func replicate(_ steps: [Step], atEqualSnapshot: ((Terminal) -> Void)? = nil) -> String? {
         let units = explode(steps)
         var resyncs = 0
         defer { if resyncs > 0 { print("streamed resyncs: \(resyncs)") } }
@@ -57,7 +59,17 @@ final class TerminalStateSnapshotTests {
             let ownerCapture = Capture()
             let owner = make(ownerCapture, responds: true)
             for step in units[..<cut] { apply(step, to: owner) }
-            let snapshot = owner.exportState()
+            // Export only at ground (IT-2001 D4, ruling B): a cut inside a
+            // sequence or a UTF-8 character waits; ExportAtGroundTests pins it.
+            if owner.hasPendingSequence {
+                if owner.exportState() != nil || owner.exportForStreaming() != nil {
+                    return "cut \(cut): exported while a sequence or character is open"
+                }
+                continue
+            }
+            guard let snapshot = owner.exportState() else {
+                return "cut \(cut): a ground cut refused to export"
+            }
             let encoded = snapshot.encoded()
             guard let decoded = try? TerminalStateSnapshot(encoded: encoded) else {
                 return "cut \(cut): the encoded snapshot does not decode"
@@ -67,9 +79,14 @@ final class TerminalStateSnapshotTests {
             let replicaCapture = Capture()
             let replica = make(replicaCapture, responds: false)
             replica.importState(decoded)
-            if let diff = firstDifference(owner.replicationDigest(), replica.replicationDigest()) {
+            let ownerDigest = owner.replicationDigest()
+            if let line = ownerDigest.first(where: { $0.contains(DigestDescriber.depthExceeded) }) {
+                return "cut \(cut): the digest nests too deep: \(line.prefix(200))"
+            }
+            if let diff = firstDifference(ownerDigest, replica.replicationDigest()) {
                 return "cut \(cut) at the snapshot: \(diff)"
             }
+            atEqualSnapshot?(owner)
             for step in units[cut...] {
                 apply(step, to: owner)
                 apply(step, to: replica)
@@ -84,7 +101,9 @@ final class TerminalStateSnapshotTests {
             let freshCapture = Capture()
             let fresh = make(freshCapture, responds: true)
             for step in units[..<cut] { apply(step, to: fresh) }
-            let export = fresh.exportForStreaming()
+            guard let export = fresh.exportForStreaming() else {
+                return "cut \(cut): the streaming export refused (wait)"
+            }
             guard let screen = try? TerminalStateSnapshot(encoded: export.screen.encoded()) else {
                 return "cut \(cut): the screen part does not decode"
             }
@@ -190,6 +209,15 @@ final class TerminalStateSnapshotTests {
         #expect(failure == nil, "\(name): \(failure ?? "")")
     }
 
+    /// IT-2001 D4: the parser hook's contract streams (ParserBoundaryTests),
+    /// end to end through the snapshot, cut at every byte.
+    @Test(arguments: ParserBoundaryTests.clauses.map(\.0))
+    func everyParserClauseCutReplicates(_ name: String) {
+        let bytes = ParserBoundaryTests.clauses.first { $0.0 == name }!.1
+        let failure = Self.replicate([.bytes(bytes)])
+        #expect(failure == nil, "\(name): \(failure ?? "")")
+    }
+
     /// Found by T3 on a recorded `less` session: a terminal made at 24 rows has an
     /// alternate buffer that holds 25 lines (it was built at the default 25), and its
     /// capacity decides when output starts trimming.
@@ -199,7 +227,7 @@ final class TerminalStateSnapshotTests {
         owner.feed(text: "\u{1b}[?1049h\u{1b}[24;1Hx")
         let replica = Terminal(delegate: Capture(), options: TerminalOptions(cols: 80, rows: 24, scrollback: 500))
         replica.respondsToQueries = false
-        replica.importState(try TerminalStateSnapshot(encoded: owner.exportState().encoded()))
+        replica.importState(try TerminalStateSnapshot(encoded: try #require(owner.exportState()).encoded()))
         #expect(owner.replicationDigest() == replica.replicationDigest())
         let tail = (0..<40).map { "\u{1b}[24;1H\r\nline \($0)" }.joined()
         owner.feed(text: tail)
@@ -209,17 +237,19 @@ final class TerminalStateSnapshotTests {
 
     @Test func everyExclusionNamesARealProperty() {
         let terminal = Terminal(delegate: Capture())
-        let terminalLabels = Set(Mirror(reflecting: terminal).children.compactMap(\.label))
+        let terminalLabels = Set(Terminal.terminalMirror(terminal).children.compactMap(\.label))
         let bufferLabels = Set(Mirror(reflecting: terminal.buffer).children.compactMap(\.label))
         let lineLabels = Set(Mirror(reflecting: terminal.buffer.lines[0]).children.compactMap(\.label))
-        #expect(Set(Terminal.digestExcludedTerminalProperties.keys).subtracting(terminalLabels).isEmpty)
-        #expect(Set(Terminal.digestExcludedBufferProperties.keys).subtracting(bufferLabels).isEmpty)
+        #expect(Set(Terminal.digestExcludedTerminalPropertiesOnThisBuild.keys).subtracting(terminalLabels).isEmpty)
+        #expect(Set(Terminal.digestExcludedBufferPropertiesOnThisBuild.keys).subtracting(bufferLabels).isEmpty)
         #expect(Set(Terminal.digestExcludedLineProperties.keys).subtracting(lineLabels).isEmpty)
+        let holderLabels = Set(ReplicationCensusTests.reflectedHolderPaths(terminal))
+        #expect(Set(Terminal.digestExcludedHolderProperties.keys).subtracting(holderLabels).isEmpty)
     }
 
-    @Test func aDifferentFormatVersionIsRefused() {
+    @Test func aDifferentFormatVersionIsRefused() throws {
         let terminal = Terminal(delegate: Capture())
-        var encoded = terminal.exportState().encoded()
+        var encoded = try #require(terminal.exportState()).encoded()
         encoded[4] &+= 1
         #expect(throws: TerminalStateSnapshotError.self) { try TerminalStateSnapshot(encoded: encoded) }
         #expect(throws: TerminalStateSnapshotError.self) { try TerminalStateSnapshot(encoded: Array(encoded.prefix(10))) }

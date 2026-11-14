@@ -102,6 +102,49 @@ final class BidiRenderTests {
         #expect(explicitText.hasSuffix("םולש"))
     }
 
+    @Test func rowsWithoutStrongCharactersKeepLeftToRightOrder() throws {
+        // Digits, spaces and punctuation have no strong direction, so CoreText
+        // lays such a row out in the default paragraph direction, which is
+        // right to left in a process running in Arabic or Hebrew. The test
+        // simulates that process by giving every range without a paragraph
+        // style a right-to-left one.
+        let directionKey = NSAttributedString.Key(kCTWritingDirectionAttributeName as String)
+        let view = makeView(feed: "1  2  3\r\n[#####     ] 50%")
+        for row in 0..<2 {
+            let info = view.withTerminal { terminal in
+                view.buildAttributedStringLocked(row: row, line: terminal.buffer.lines[row],
+                                                 cols: terminal.cols)
+            }
+            let segment = try #require(info.segments.first)
+            let string = segment.attributedString
+            #expect((string.attribute(directionKey, at: 0, effectiveRange: nil) as? [NSNumber])
+                        == [NSNumber(value: 2)])
+            let style = string.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+            #expect(style?.baseWritingDirection == .leftToRight)
+
+            // The first cell starts at the left edge, and cells keep their order.
+            let text = string.string as NSString
+            let line = CTLineCreateWithAttributedString(rightToLeftByDefault(string))
+            #expect(CTLineGetOffsetForStringIndex(line, 0, nil) == 0)
+            let later = text.range(of: row == 0 ? "3" : "5").location
+            #expect(CTLineGetOffsetForStringIndex(line, later, nil)
+                        > CTLineGetOffsetForStringIndex(line, 1, nil))
+        }
+    }
+
+    func rightToLeftByDefault(_ string: NSAttributedString) -> NSAttributedString {
+        let result = NSMutableAttributedString(attributedString: string)
+        let rightToLeft = NSMutableParagraphStyle()
+        rightToLeft.baseWritingDirection = .rightToLeft
+        let whole = NSRange(location: 0, length: result.length)
+        string.enumerateAttribute(.paragraphStyle, in: whole) { value, range, _ in
+            if value == nil {
+                result.addAttribute(.paragraphStyle, value: rightToLeft, range: range)
+            }
+        }
+        return result
+    }
+
     @Test func explicitRTLStoresApplicationCellsAndReversesThemForDisplay() {
         let source = "321 cba אבג :LTR ticilpxe"
         let view = makeView(feed: "\u{1b}[8l\u{1b}[2 k" + source)
@@ -164,6 +207,31 @@ final class BidiRenderTests {
 
         let invalidated = try #require(view.invalidatedRects.last)
         #expect(abs(invalidated.maxY - view.bounds.maxY) < 0.5)
+    }
+
+    @Test func lineFeedRedrawsBothPartsOfASplitArabicParagraph() throws {
+        let view = InvalidationTrackingView(
+            frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let cellWidth = view.cellDimension.width
+        let cellHeight = view.cellDimension.height
+        view.setFrameSize(NSSize(width: cellWidth * 10 + 1, height: cellHeight * 5 + 1))
+        let cols = view.withTerminal { $0.cols }
+        view.feed(text: String(repeating: "ب", count: cols + 2))
+        view.feed(text: "\u{1b}[H")
+        view.frameTick()
+
+        let before = segmentText(view, row: 0).trimmingCharacters(in: .whitespaces)
+        #expect(before.first == "\u{FE92}")
+        view.invalidatedRects.removeAll()
+
+        view.feed(text: "\n")
+        view.frameTick()
+
+        let after = segmentText(view, row: 0).trimmingCharacters(in: .whitespaces)
+        #expect(after.first == "\u{FE90}")
+        let invalidated = try #require(view.invalidatedRects.last)
+        #expect(abs(invalidated.maxY - view.bounds.maxY) < 0.5)
+        #expect(invalidated.height >= 2 * cellHeight)
     }
 
     @Test func caretIsDrawnAtVisualColumn() throws {

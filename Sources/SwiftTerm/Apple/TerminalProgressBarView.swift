@@ -5,6 +5,8 @@
 //  Created by Codex on 2/1/26.
 //
 
+#if !SWIFTTERM_EMBEDDED
+#if os(macOS) || os(iOS) || os(visionOS) || os(tvOS)
 #if os(macOS)
 import AppKit
 typealias ProgressBarBaseView = NSView
@@ -33,6 +35,20 @@ final class TerminalProgressBarView: ProgressBarBaseView {
     private var progress: UInt8?
     /// Bounds the running indeterminate animation was built for.
     private var animatedBounds: CGRect = .zero
+
+    /// Color for the running states, or `nil` for the platform accent color.
+    /// The error and paused states keep their system colors either way.
+    var tint: ProgressBarColor? {
+        didSet {
+            guard tint != oldValue else { return }
+            applyColors()
+        }
+    }
+
+    /// The color the bar is painted with right now.
+    var barColor: CGColor? {
+        barLayer.backgroundColor
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -91,10 +107,14 @@ final class TerminalProgressBarView: ProgressBarBaseView {
             return
         }
 
+        applyColors()
+        updateForCurrentState(animated: true)
+    }
+
+    private func applyColors() {
         let color = color(for: state)
         barLayer.backgroundColor = color.cgColor
         trackLayer.backgroundColor = color.withAlphaComponent(0.3).cgColor
-        updateForCurrentState(animated: true)
     }
 
     /// Ghostty's rule: an explicit percentage wins, a paused report with no
@@ -188,13 +208,16 @@ final class TerminalProgressBarView: ProgressBarBaseView {
         barLayer.removeAnimation(forKey: indeterminateAnimationKey)
     }
 
-    private func color(for state: Terminal.ProgressReportState) -> ProgressBarColor {
+    func color(for state: Terminal.ProgressReportState) -> ProgressBarColor {
         switch state {
         case .error:
             return .systemRed
         case .pause:
             return .systemOrange
         default:
+            if let tint {
+                return tint
+            }
             #if os(macOS)
             return .controlAccentColor
             #else
@@ -203,3 +226,6 @@ final class TerminalProgressBarView: ProgressBarBaseView {
         }
     }
 }
+
+#endif
+#endif // !SWIFTTERM_EMBEDDED

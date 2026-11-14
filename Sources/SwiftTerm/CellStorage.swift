@@ -6,7 +6,9 @@
 //  in an arena that is shared by all lines of a terminal.
 //
 
+#if !SWIFTTERM_EMBEDDED
 import Foundation
+#endif
 
 /// The fixed-size value that SwiftTerm stores for each terminal cell.
 ///
@@ -311,22 +313,8 @@ final class CellArena {
     /// them. New clusters degrade to their first scalar after this limit.
     private static let defaultGraphemeCapacity = Int(UInt16.max)
 
-    /// Slots a live arena allocates up front. Most terminals intern a few
-    /// hundred styles at most, so the table starts small and doubles on
-    /// demand instead of reserving all 65,536 slots (896 KB) per arena.
-    static let initialAttributeSlots = 256
-
-    /// Largest identifier `intern(attribute:)` may hand out.
     private let attributeCapacity: Int
-    /// Slots currently allocated at `attributes`. A live arena grows this by
-    /// doubling up to `attributeCapacity + 1`. A snapshot arena never grows.
-    private var attributeSlots: Int
-    private var attributes: UnsafeMutablePointer<Attribute>
-    /// Tables a live arena outgrew, with their initialized counts. They are
-    /// freed only in `deinit`, so an attribute table this arena ever
-    /// exposed stays readable for the arena's lifetime. The retired tables
-    /// together are smaller than the current one.
-    private var retiredAttributeTables: [(table: UnsafeMutablePointer<Attribute>, count: Int)] = []
+    private let attributes: UnsafeMutablePointer<Attribute>
     private var attributeCountValue = 1
     private var attributeIdentifiers: [InternedAttributeKey: UInt16] = [:]
 
@@ -336,6 +324,21 @@ final class CellArena {
     private var allocatedGraphemeBlockCount = 0
     private var graphemeCountValue: UInt32 = 0
     private var graphemeIdentifiers: [[UInt32]: UInt32] = [:]
+
+    /// Direct-mapped cache in front of `attributeIdentifiers`. SGR-heavy
+    /// output interns an attribute for nearly every run, and hashing the
+    /// two-word key through `Dictionary` (plus the exclusivity check on this
+    /// class property) was ~11% of the parse thread on dense_cells. Keep this
+    /// after the grapheme state so adding it does not move Unicode-hot fields.
+    /// An entry only ever holds a pair that is also in the dictionary, and
+    /// neither is ever removed, so a hit is always correct.
+    private struct AttributeCacheEntry {
+        var word0: UInt64
+        var word1: UInt64
+        var identifierPlusOne: UInt32
+    }
+    private static let attributeCacheSize = 1 << 10
+    @exclusivity(unchecked) private var attributeCache: [AttributeCacheEntry]
 
 #if DEBUG
     private(set) var snapshotAttributeEntriesCopied = 0
@@ -352,10 +355,10 @@ final class CellArena {
         snapshotSourceIdentity = nil
         isSnapshotCopy = false
         attributeCapacity = min(max(styleCapacity, 0), Int(UInt16.max))
-        attributeSlots = min(Self.initialAttributeSlots, attributeCapacity + 1)
-        attributes = .allocate(capacity: attributeSlots)
+        attributes = .allocate(capacity: attributeCapacity + 1)
         attributes.initialize(to: CharData.defaultAttr)
         attributeIdentifiers[InternedAttributeKey(CharData.defaultAttr)] = 0
+        attributeCache = Self.makeAttributeCache()
 
         self.graphemeCapacity = min(max(graphemeCapacity, 0), Self.maximumGraphemeID)
         graphemeBlockCapacity = max(1, (self.graphemeCapacity + Self.graphemeBlockSize - 1) /
@@ -374,21 +377,18 @@ final class CellArena {
         isSnapshotCopy = true
 
         // Keep the pointer stable for the lifetime of this snapshot arena.
-        // The snapshot takes the source's current slot count and never grows,
-        // so later refreshes can append only the newly published entries
-        // without copying the existing prefix again. When the live arena
-        // grows past these slots, `synchronizeSnapshotPrefix` refuses and the
-        // caller takes a fresh snapshot. Rows that still refer to this arena
-        // keep it, and its pointer, alive.
+        // A terminal arena has a fixed identifier capacity, so later refreshes
+        // can append only the newly published entries without copying the
+        // existing prefix again.
         attributeCapacity = source.attributeCapacity
-        attributeSlots = source.attributeSlots
-        attributes = .allocate(capacity: attributeSlots)
+        attributes = .allocate(capacity: attributeCapacity + 1)
         attributes.initialize(from: source.attributes,
                               count: source.attributeCountValue)
         attributeCountValue = source.attributeCountValue
         // Snapshot rows decode existing cells. Keep only the default reverse
         // lookup that the out-of-range blank-cell path can request.
         attributeIdentifiers = [InternedAttributeKey(CharData.defaultAttr): 0]
+        attributeCache = Self.makeAttributeCache()
 
         graphemeCapacity = source.graphemeCapacity
         graphemeBlockCapacity = source.graphemeBlockCapacity
@@ -428,7 +428,7 @@ final class CellArena {
               snapshotSourceIdentity === source.identity,
               source.attributeCountValue >= attributeCountValue,
               source.graphemeCountValue >= graphemeCountValue,
-              source.attributeCountValue <= attributeSlots,
+              source.attributeCountValue <= attributeCapacity + 1,
               source.graphemeCountValue <= UInt32(graphemeCapacity)
         else {
             return false
@@ -483,10 +483,6 @@ final class CellArena {
     deinit {
         attributes.deinitialize(count: attributeCountValue)
         attributes.deallocate()
-        for retired in retiredAttributeTables {
-            retired.table.deinitialize(count: retired.count)
-            retired.table.deallocate()
-        }
 
         for blockIndex in 0..<allocatedGraphemeBlockCount {
             if let block = graphemeBlocks[blockIndex] {
@@ -501,9 +497,32 @@ final class CellArena {
     var attributeCount: Int { attributeCountValue - 1 }
     var graphemeCount: Int { Int(graphemeCountValue) }
 
+    private static func makeAttributeCache() -> [AttributeCacheEntry] {
+        Array(repeating: AttributeCacheEntry(word0: 0, word1: 0, identifierPlusOne: 0),
+              count: attributeCacheSize)
+    }
+
+    @inline(__always)
+    private static func attributeCacheSlot(_ key: InternedAttributeKey) -> Int {
+        let mixed = (key.word0 ^ (key.word1 &* 0x9E37_79B9_7F4A_7C15)) &* 0xBF58_476D_1CE4_E5B9
+        return Int(truncatingIfNeeded: mixed >> 54)
+    }
+
     func intern(attribute: Attribute) -> UInt16? {
         let key = InternedAttributeKey(attribute)
+        // The default attribute is permanently identifier zero and encodes as
+        // an all-zero key. Avoid cache and dictionary lookups for this common case.
+        if key.word0 == 0, key.word1 == 0 {
+            return 0
+        }
+        let slot = Self.attributeCacheSlot(key)
+        let cached = attributeCache[slot]
+        if cached.identifierPlusOne != 0, cached.word0 == key.word0, cached.word1 == key.word1 {
+            return UInt16(truncatingIfNeeded: cached.identifierPlusOne &- 1)
+        }
         if let identifier = attributeIdentifiers[key] {
+            attributeCache[slot] = AttributeCacheEntry(word0: key.word0, word1: key.word1,
+                                                       identifierPlusOne: UInt32(identifier) + 1)
             return identifier
         }
         guard !isSnapshotCopy else {
@@ -512,34 +531,15 @@ final class CellArena {
         guard attributeCountValue <= attributeCapacity else {
             return nil
         }
-        if attributeCountValue == attributeSlots {
-            growAttributeTable()
-        }
 
         let identifier = UInt16(attributeCountValue)
         attributes.advanced(by: attributeCountValue).initialize(to: attribute)
         attributeCountValue += 1
         attributeIdentifiers[key] = identifier
+        attributeCache[slot] = AttributeCacheEntry(word0: key.word0, word1: key.word1,
+                                                   identifierPlusOne: UInt32(identifier) + 1)
         return identifier
     }
-
-    /// Copy-on-grow for live arenas. Identifiers are indices, so they stay
-    /// valid in the larger table. The outgrown table is retired, not freed.
-    private func growAttributeTable() {
-        precondition(!isSnapshotCopy, "Snapshot cell arenas never grow")
-        let newSlots = min(attributeSlots * 2, attributeCapacity + 1)
-        precondition(newSlots > attributeSlots, "The cell arena attribute table is full")
-        let grown = UnsafeMutablePointer<Attribute>.allocate(capacity: newSlots)
-        grown.initialize(from: attributes, count: attributeCountValue)
-        retiredAttributeTables.append((attributes, attributeCountValue))
-        attributes = grown
-        attributeSlots = newSlots
-    }
-
-#if DEBUG
-    var attributeSlotCount: Int { attributeSlots }
-    var retiredAttributeTableCount: Int { retiredAttributeTables.count }
-#endif
 
     /// Creates a scalar cell from an attribute identifier that is already
     /// owned by this arena. This is the main parser path.
@@ -566,7 +566,7 @@ final class CellArena {
               payloadCode: UInt16 = 0, semanticContentCode: UInt8 = 0,
               isProtected: Bool = false) -> PackedCell?
     {
-        pack(styleID: styleID, scalars: character.unicodeScalars.map(\.value),
+        pack(styleID: styleID, scalars: character.unicodeScalars.map { $0.value },
              widthState: widthState, payloadCode: payloadCode,
              semanticContentCode: semanticContentCode, isProtected: isProtected)
     }
@@ -603,16 +603,13 @@ final class CellArena {
 
     @inline(__always)
     func attribute(for identifier: UInt16) -> Attribute {
-        let index = Int(identifier)
-        // A cell may carry only identifiers this arena published.
-        assert(index < attributeCountValue,
-               "Attribute identifier was not published by this cell arena")
-        // The table holds only `attributeSlots` entries, not every UInt16,
-        // so a stray identifier must not read past the allocation in release
-        // builds either.
-        guard index < attributeSlots else { return CharData.defaultAttr }
-        return attributes[index]
+        attributes[Int(identifier)]
     }
+
+    /// The largest number of attributes this arena can intern.
+    var attributeLimit: Int { attributeCapacity }
+    /// The largest number of grapheme clusters this arena can intern.
+    var graphemeLimit: Int { graphemeCapacity }
 
     func intern(grapheme scalars: [UInt32]) -> UInt32? {
         if let identifier = graphemeIdentifiers[scalars] {
@@ -817,7 +814,7 @@ final class CellArena {
               payloadCode: UInt16 = 0, semanticContentCode: UInt8 = 0,
               isProtected: Bool = false) -> PackedCell?
     {
-        let scalars = character.unicodeScalars.map(\.value)
+        let scalars = character.unicodeScalars.map { $0.value }
         if scalars.count == 1, let scalar = scalars.first {
             return pack(attribute: attribute, scalar: scalar, widthState: widthState,
                         payloadCode: payloadCode,
@@ -942,7 +939,11 @@ final class CellArena {
 /// snapshot that produced the view must outlive it.
 struct PackedCellView {
     let packed: PackedCell
+#if SWIFTTERM_EMBEDDED
+    let arena: CellArena
+#else
     unowned(unsafe) let arena: CellArena
+#endif
 
     @inline(__always) var code: Int32 { arena.logicalCode(for: packed) }
     @inline(__always) var width: Int8 { arena.width(for: packed) }
@@ -969,8 +970,13 @@ struct PackedCellView {
         arena.scalarValues(for: packed, appending: scalar)
     }
 
+#if SWIFTTERM_EMBEDDED
+    @inline(__always)
+    func getPayload() -> String? { TinyAtom.stored(code: packed.payloadCode).target }
+#else
     @inline(__always)
     func getPayload() -> (any Sendable)? { TinyAtom.stored(code: packed.payloadCode).target }
+#endif
 
     @inline(__always)
     func expanded() -> CharData { arena.unpack(packed) }
@@ -982,6 +988,17 @@ final class CellStoragePage {
     let arena: CellArena
 
     var count: Int { cells.count }
+
+    /// Calls `body` with the payload code of each cell that holds one.
+    @inline(__always)
+    func forEachPayloadCode(_ body: (UInt16) -> Void) {
+        for cell in cells {
+            let code = cell.payloadCode
+            if code != 0 {
+                body(code)
+            }
+        }
+    }
 
     init(count: Int, repeating value: CharData = CharData.Null,
          arena: CellArena? = nil, styleCapacity: Int = Int(UInt16.max))
@@ -1104,10 +1121,13 @@ final class CellStoragePage {
         guard !source.isEmpty else { return }
         source.withUnsafeBufferPointer { sourceBuffer in
             let destination = cells.baseAddress!.advanced(by: destinationStart)
-            for offset in sourceBuffer.indices {
+            // Not a Range loop: that's a generic call per element unoptimized.
+            var offset = 0
+            while offset < sourceBuffer.count {
                 let rawValue = template |
                     (UInt64(sourceBuffer[offset]) << PackedCell.contentShift)
                 destination[offset] = PackedCell(rawValue: rawValue)
+                offset += 1
             }
         }
     }
@@ -1202,7 +1222,7 @@ final class CellStoragePage {
     var hasStyles: Bool { cells.contains { $0.styleID != 0 } }
     var hasGraphemes: Bool { cells.contains { $0.contentTag == .grapheme } }
     var hasPayloads: Bool { cells.contains { $0.payloadCode != 0 } }
-    var styleCount: Int { Set(cells.lazy.map(\.styleID).filter { $0 != 0 }).count }
+    var styleCount: Int { Set(cells.lazy.map { $0.styleID }.filter { $0 != 0 }).count }
     var graphemeCount: Int { cells.lazy.filter { $0.contentTag == .grapheme }.count }
     var payloadCount: Int { cells.lazy.filter { $0.payloadCode != 0 }.count }
 

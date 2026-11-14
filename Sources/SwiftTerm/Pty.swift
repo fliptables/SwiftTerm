@@ -5,8 +5,9 @@
 //  Created by Miguel de Icaza on 3/4/20.
 //
 
+#if !SWIFTTERM_EMBEDDED
 import Foundation
-#if !os(iOS) && !os(tvOS) && !os(Windows)
+#if !os(WASI) && !os(iOS) && !os(tvOS) && !os(Windows) && !os(Android)
 
 /**
  * APIs to assist in controlling a Unix pseudo-terminal from Swift.
@@ -16,6 +17,20 @@ import Foundation
  * `setWinSize` and `availableBytes`
  */
 public class PseudoTerminalHelpers {
+#if os(Linux)
+    /// IT-2001: glibc's close_range(unsigned first, unsigned last, int flags)
+    /// (glibc >= 2.34). Swift cannot call the variadic syscall(), and the Glibc
+    /// module does not declare close_range (it is under _GNU_SOURCE), so it is
+    /// resolved with dlsym, once, in the parent (dlsym is not async-signal-safe).
+    /// nil (older glibc, musl) = the child runs its close loop.
+    typealias CloseRangeFunction = @convention(c) (UInt32, UInt32, Int32) -> Int32
+    static let closeRangeFunction: CloseRangeFunction? = {
+        guard let handle = dlopen(nil, RTLD_NOW), let symbol = dlsym(handle, "close_range") else {
+            return nil
+        }
+        return unsafeBitCast(symbol, to: CloseRangeFunction.self)
+    }()
+#endif
     private struct CStringArray {
         let base: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
         let count: Int
@@ -92,6 +107,20 @@ public class PseudoTerminalHelpers {
             }
         }
 
+        // Build the signal state before fork. The child must use only
+        // async-signal-safe system calls until execve.
+        var defaultAction = sigaction()
+#if canImport(Darwin)
+        defaultAction.__sigaction_u.__sa_handler = SIG_DFL
+#elseif canImport(Musl)
+        defaultAction.__sa_handler.sa_handler = SIG_DFL
+#else
+        defaultAction.__sigaction_handler.sa_handler = SIG_DFL
+#endif
+        sigemptyset(&defaultAction.sa_mask)
+        defaultAction.sa_flags = 0
+        var emptyMask = sigset_t()
+        sigemptyset(&emptyMask)
         var master: Int32 = 0
 
         // Exclusive upper bound for the child's fd close loop, sampled BEFORE
@@ -100,6 +129,11 @@ public class PseudoTerminalHelpers {
         // allocatable fd NUMBERS: dup2/open to any number >= it fails EBADF
         // (empirically verified — see Scape
         // docs/spikes/2026-07-19-it301-fd-hygiene-fix-findings.md).
+        // On Linux (glibc and musl) getdtablesize() returns the RLIMIT_NOFILE
+        // soft limit, which is likewise the exclusive bound on fd numbers an
+        // open/dup can allocate; the same sample and floor apply. The Scape
+        // daemon is the parent of every session there, and is multithreaded
+        // (IT-2001 D5).
         // Precomputed in the parent because getdtablesize() is not among the
         // portable async-signal-safe functions; the child loop below must be
         // only close() + scalar arithmetic. Floor of OPEN_MAX (10240) guards
@@ -113,16 +147,36 @@ public class PseudoTerminalHelpers {
         // or SwiftTerm (grep-verified 2026-07-19); if one is ever added,
         // revisit this bound.
         let fdLimit = max(getdtablesize(), 10240)
+#if os(Linux)
+        // IT-2001: read in the PARENT, so the child touches no lazy static.
+        let closeRange = PseudoTerminalHelpers.closeRangeFunction
+#endif
 
         let pid = forkpty(&master, nil, nil, &desiredWindowSize)
         if pid < 0 {
             return nil
         }
         if pid == 0 {
+            // Signal ignores and the calling thread's mask survive exec.
+            // A server can ignore SIGINT for a DispatchSource or block it on
+            // a worker thread. Do not pass that policy to terminal programs.
+            // Reset dispositions before unblocking, so no inherited handler
+            // can run in the child between fork and exec. Some platforms
+            // reserve signal numbers; sigaction rejects those with EINVAL.
+            var number: Int32 = 1
+            while number < NSIG {
+                if number != SIGKILL && number != SIGSTOP {
+                    _ = sigaction(number, &defaultAction, nil)
+                }
+                number += 1
+            }
+            if sigprocmask(SIG_SETMASK, &emptyMask, nil) != 0 {
+                _exit(127)
+            }
             if let cCurrentDirectory {
                 _ = chdir(cCurrentDirectory)
             }
-
+            
             // Close every inherited fd >= 3 before exec (fdLimit — the bound
             // on allocatable fd numbers — was sampled pre-fork above, so this
             // sweep covers every fd the parent could possibly have open).
@@ -142,6 +196,16 @@ public class PseudoTerminalHelpers {
             // If a deliberately-inherited fd is ever introduced (none exist
             // today), it must be allowlisted explicitly in this loop.
             var leakedFd: Int32 = 3
+#if os(Linux)
+            // IT-2001: close_range(3, ~0U, 0) closes the same fds in one system
+            // call (Linux CI, RLIMIT_NOFILE 65536: ~0.2 ms vs ~20 ms for the
+            // loop). A call through a pointer resolved before fork: async-signal-
+            // safe, allocates nothing. ANY non-zero return (ENOSYS, EINVAL, EPERM
+            // under seccomp) leaves leakedFd at 3 and the loop below runs.
+            if let closeRange, closeRange(3, UInt32.max, 0) == 0 {
+                leakedFd = fdLimit
+            }
+#endif
             while leakedFd < fdLimit {
                 close(leakedFd)
                 leakedFd += 1
@@ -219,3 +283,5 @@ public class PseudoTerminalHelpers {
     }
 }
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

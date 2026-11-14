@@ -5,6 +5,7 @@
 //  Owns the mutable snapshot and Metal renderer used by one terminal view.
 //
 
+#if !SWIFTTERM_EMBEDDED
 #if os(macOS) || os(iOS) || os(visionOS) || os(macCatalyst)
 import Foundation
 import CoreGraphics
@@ -288,6 +289,29 @@ final class TerminalRenderOwner: Sendable {
         }
     }
 
+    func mouseEventBytes(button: Int, release: Bool, motion: Bool, shift: Bool, meta: Bool,
+                         control: Bool, col: Int, row: Int,
+                         pixelX: Int?, pixelY: Int?) -> [UInt8]? {
+        switch button {
+        case 0, 1, 2, 4, 5, 6, 7: break
+        default: return nil
+        }
+        guard col >= 0, row >= 0, col <= Int.max - 33, row <= Int.max - 33,
+              pixelX.map({ $0 >= 0 && $0 < Int.max }) ?? true,
+              pixelY.map({ $0 >= 0 && $0 < Int.max }) ?? true,
+              let session = currentSession() else { return nil }
+        let terminal = session.terminal
+        precondition(!terminal.terminalLock.isLockedByCurrentThread,
+                     "Mouse input cannot be sent from a terminal callback")
+        return terminal.terminalLock.withLock {
+            let flags = terminal.encodeButton(button: button, release: release,
+                                               shift: shift, meta: meta, control: control)
+                + (motion && !release ? 32 : 0)
+            return terminal.mouseEventBytes(buttonFlags: flags, x: col, y: row,
+                                            pixelX: pixelX ?? col, pixelY: pixelY ?? row)
+        }
+    }
+
     func dimensions() -> TerminalDimensions {
         guard let terminal = currentSession()?.terminal else {
             return TerminalDimensions(cols: 0, rows: 0)
@@ -297,11 +321,50 @@ final class TerminalRenderOwner: Sendable {
         }
     }
 
+    func inputStateSnapshot() -> TerminalInputStateSnapshot? {
+        currentSession()?.terminal.inputStateSnapshot()
+    }
+
+    func contentSnapshot(region: TerminalContentRegion,
+                         buffer: Terminal.BufferKind = .active) -> TerminalContentSnapshot? {
+        currentSession()?.terminal.contentSnapshot(region: region, buffer: buffer)
+    }
+
+    func keyboardEnhancementFlags() -> KittyKeyboardFlags {
+        guard let terminal = currentSession()?.terminal else {
+            return []
+        }
+        return terminal.terminalLock.withLock {
+            terminal.keyboardEnhancementFlags
+        }
+    }
+
+    func visibleRowsText(_ rows: Range<Int>) -> [String] {
+        guard let terminal = currentSession()?.terminal else { return [] }
+        return terminal.terminalLock.withLock {
+            let buffer = terminal.displayBuffer
+            let screen = 0..<max(0, terminal.rows)
+            return rows.clamped(to: screen).compactMap { row -> String? in
+                let lineIndex = buffer.yDisp + row
+                guard lineIndex >= 0, lineIndex < buffer.lines.count else { return nil }
+                return terminal.displayText(
+                    buffer: buffer, line: lineIndex, columns: terminal.cols)
+            }
+        }
+    }
+
     func bufferData(kind: Terminal.BufferKind,
                     encoding: String.Encoding) -> Data {
         guard let terminal = currentSession()?.terminal else { return Data() }
         return terminal.terminalLock.withLock {
             terminal.getBufferAsData(kind: kind, encoding: encoding)
+        }
+    }
+
+    func setCursorStyle(_ style: CursorStyle) {
+        guard let terminal = currentSession()?.terminal else { return }
+        terminal.terminalLock.withLock {
+            terminal.setCursorStyle(style)
         }
     }
 
@@ -333,6 +396,7 @@ final class TerminalRenderOwner: Sendable {
                 dimensions: TerminalDimensions(cols: 0, rows: 0),
                 cursor: Position(col: 0, row: 0),
                 viewportRow: 0,
+                bracketedPasteMode: false,
                 currentBidiState: .default,
                 bidiArrowKeySwap: false,
                 cursorStyle: .blinkBlock,
@@ -348,9 +412,8 @@ final class TerminalRenderOwner: Sendable {
                         return nil
                     }
                     let line = buffer.lines[lineIndex]
-                    let text = terminal.translateBufferLineToString(
-                        buffer: buffer, line: lineIndex, start: 0, end: -1)
-                        .replacingOccurrences(of: "\u{0}", with: " ")
+                    let text = terminal.displayText(
+                        buffer: buffer, line: lineIndex, columns: terminal.cols)
                     return TerminalVisibleRowSnapshot(
                         row: row,
                         text: text,
@@ -365,6 +428,7 @@ final class TerminalRenderOwner: Sendable {
                         cols: terminal.cols, rows: terminal.rows),
                     cursor: Position(col: buffer.x, row: buffer.y),
                     viewportRow: buffer.yDisp,
+                    bracketedPasteMode: terminal.bracketedPasteMode,
                     currentBidiState: terminal.currentBidiState,
                     bidiArrowKeySwap: terminal.bidiArrowKeySwap,
                     cursorStyle: terminal.options.cursorStyle,
@@ -382,13 +446,13 @@ final class TerminalRenderOwner: Sendable {
             if searchingUpward {
                 guard start > 0 else { return nil }
                 for row in stride(from: start - 1, through: 0, by: -1) {
-                    if terminal.semanticRowKind(at: row) == .initial {
+                    if buffer.semanticRowOpensPrompt(row) {
                         return row
                     }
                 }
             } else if start + 1 < buffer.lines.count {
                 for row in (start + 1)..<buffer.lines.count {
-                    if terminal.semanticRowKind(at: row) == .initial {
+                    if buffer.semanticRowOpensPrompt(row) {
                         return row
                     }
                 }
@@ -490,6 +554,7 @@ final class TerminalRenderOwner: Sendable {
                 frozen.resizedTo = (cols: resizedTo.cols, rows: resizedTo.rows)
 #if os(macOS)
                 frozen.scroller = scrollerState
+                frozen.mainEffects.selection = selectionState
 #endif
                 return frozen
             }
@@ -589,6 +654,7 @@ final class TerminalRenderOwner: Sendable {
             result.resizedTo = resizedTo.map { (cols: $0.cols, rows: $0.rows) }
 #if os(macOS)
             result.scroller = scrollerState
+            result.mainEffects.selection = selectionState
 #endif
             return result
         }
@@ -891,3 +957,5 @@ final class TerminalRenderOwner: Sendable {
 #endif
 }
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

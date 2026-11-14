@@ -124,6 +124,33 @@ The SwiftTerm library itself contains the source code for both
 the engine and the front-ends.  The front-ends are conditionally
 compiled based on the target platform.
 
+## Embedded Swift
+
+SwiftTerm has a Foundation-free, headless core for Embedded Swift. Select it
+with the `Embedded` package trait. It omits the Apple views, local-process
+host, image decoders, and Kitty Clipboard. Embedded builds require Swift 6.3
+or later. The portable host APIs are documented in the
+[DocC guide](Sources/SwiftTerm/Documentation.docc/PortableHosting.md).
+See the [Embedded Swift build and integration guide](Docs/embedded-swift.md)
+for trait, compiler, and target settings.
+
+## WebAssembly
+
+SwiftTerm supplies a browser and Node.js terminal engine with ABI version 1,
+copied render snapshots, generated reply bytes, and host-event queues. The
+TypeScript package loads either the Full or Embedded WASM reactor. The host
+supplies a renderer and PTY transport. The Full build supports PNG, Kitty,
+Sixel, iTerm graphics, and Kitty Clipboard; Embedded keeps terminal input,
+selection, scrollback, and bracketed paste while omitting graphics and
+clipboard support. A Canvas 2D example is included.
+
+See the [WebAssembly build and browser guide](Docs/wasm.md) for the pinned
+compiler/SDK pair, build commands, API use, limits, and tests.
+
+The [Web terminal sample](TerminalApp/WebTerminal/README.md) is a SwiftPM
+package with a Hummingbird server, WebSocket transport, and a local shell PTY.
+Run `TerminalApp/WebTerminal/run.sh` to start it on localhost.
+
 The engine is in this directory, while code for macOS lives under `Mac`, and
 code for iOS, lives under `iOS`.    Given that those two share a lot of common 
 traits, the shared code is under `Apple`.
@@ -169,9 +196,15 @@ Both AppKit and UIKit `TerminalView` expose `linkReporting`:
 
 `linkReporting` controls link discovery/tracking. Link activation is additionally gated by `linkHighlightMode`.
 
-When the user activates a link, `TerminalView` calls `TerminalViewDelegate.requestOpenLink(source:link:params:)`.
-For explicit OSC 8 hyperlinks, `params` includes parsed key/value metadata (if provided); implicit links use empty `params`.
-On macOS, the default delegate implementation opens links via `NSWorkspace`. On iOS/visionOS, handle `requestOpenLink` in your delegate.
+When the user activates a link, `TerminalView` calls `TerminalViewDelegate.requestOpenLink(source:request:)`.
+The `TerminalLinkRequest` has the link text from the terminal output, which is untrusted.
+`request.isExplicit` is true for an OSC 8 hyperlink. For an OSC 8 hyperlink, `request.params` includes parsed key/value metadata (if provided); implicit links use empty `params`.
+On macOS, the default delegate implementation checks the link and opens it via `NSWorkspace`. A custom delegate can call `request.openDefault()` to do the same.
+On iOS/visionOS, implement `requestOpenLink(source:request:)` in your delegate.
+`requestOpenLink(source:link:params:)` is deprecated.
+On macOS, that old method still receives a checked URL, so it cannot recover a
+source path's `:line` suffix. See [Link customization](Sources/SwiftTerm/Documentation.docc/Customization.md#migrate-a-macos-link-delegate)
+for a migration example and the checks needed when an app opens links itself.
 
 * On macOS, tracking is hover-based. The default highlight mode is `.hoverWithModifier`, so Command-hover and Command-click are the default link interaction.
 * On iOS/visionOS, tracking is driven by pointer/hover interactions (`UIPointerInteraction` / `UIHoverGestureRecognizer`), and tap activation depends on the active `linkHighlightMode` (including modifier requirements for modifier-based modes).
@@ -246,17 +279,27 @@ it will run this one.   To run the test suite, select the 'SwiftTerm' target
 instead, and you can use 'SwiftTermFuzz' to run the fuzzer.
 
 You can use `swift build` to build the package, and `swift test` to
-run the test suite.  For better test coverage, clone the esctest
-repository which contains comprehensive terminal emulator tests:
+run the test suite.  Debug builds skip the invariant checks that walk a
+whole row, which are too slow for everyday use; run the tests with
+`SWIFTTERM_EXPENSIVE_ASSERTS=1 swift test` to turn them on, as CI does.
+For better test coverage, fetch esctest, a
+conformance suite for terminal emulators:
 
 ```
 make clone-esctest
 swift test
 ```
 
-This clones the [esctest](https://github.com/migueldeicaza/esctest)
-repository (Python 3 branch) and enables the full terminal compliance
-test suite to run.
+This fetches a pinned commit of
+[esctest2](https://github.com/ThomasDickey/esctest2). `testKnownGood`
+then runs the esctest tests listed in
+`Tests/SwiftTermTests/Fixtures/esctest-known-good.txt`, and fails if one
+of them fails.
+
+To run the whole suite and see every failure, run `make esctest-report`,
+which writes `esctest.log`.  When a change makes more tests pass, make
+two logs and update the list with `scripts/esctest-known-good.py`; the
+script describes the steps.
 
 If using Xcode, you can select the "SwiftTerm" project, and then use Command-U 
 to run the test suite.

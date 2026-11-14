@@ -1,3 +1,4 @@
+#if !SWIFTTERM_EMBEDDED
 //
 //  SynchronizedOutputWatchdog.swift
 //  SwiftTerm
@@ -38,6 +39,13 @@ final class SynchronizedOutputWatchdog: @unchecked Sendable {
             condition.lock()
             defer { condition.unlock() }
             return state.counters
+        }
+
+        /// The generation of the outstanding arm, or nil (tests: IT-2001 P1).
+        var armedGeneration: UInt64? {
+            condition.lock()
+            defer { condition.unlock() }
+            return state.armedGeneration
         }
 
         func attach(terminal: Terminal, disarm: () -> Void) {
@@ -191,4 +199,6 @@ final class SynchronizedOutputWatchdog: @unchecked Sendable {
         target.fire()
     }
 }
+#endif
+
 #endif

@@ -4,7 +4,8 @@
 //
 //  Created by Miguel de Icaza on 4/5/20.
 //
-#if !os(iOS) && !os(Windows)
+#if !SWIFTTERM_EMBEDDED
+#if !os(iOS) && !os(Windows) && !os(WASI) && !os(Android)
 import Foundation
 
 ///
@@ -19,6 +20,7 @@ import Foundation
 public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
     public private(set) var terminal: Terminal!
     public var process: LocalProcess!
+    private let onLaunchFailure: ((LocalProcessError) -> Void)?
     var onEnd: (_ exitCode: Int32?) -> ()
     var dir: String?
     let deliveryQueue: DispatchQueue
@@ -31,6 +33,7 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
     private let inputRegistrationTerminal = Locked<Terminal?>(nil)
 
     /// Creates a headless terminal.
+    /// Use onLaunchFailure to handle launch errors. onEnd reports child exit only.
     ///
     /// If `queue` is `nil`, the terminal and its local process share one
     /// private serial queue. Pass `DispatchQueue.main` explicitly if required.
@@ -42,10 +45,12 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
         queue: DispatchQueue? = nil,
         options: TerminalOptions = TerminalOptions.default,
         directDelivery: Bool = false,
+        onLaunchFailure: ((LocalProcessError) -> Void)? = nil,
         onEnd: @escaping (_ exitCode: Int32?) -> ()
     )
     {
         let deliveryQueue = LocalProcess.effectiveDeliveryQueue(queue)
+        self.onLaunchFailure = onLaunchFailure
         self.onEnd = onEnd
         self.deliveryQueue = deliveryQueue
         self.directDelivery = directDelivery
@@ -57,9 +62,18 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
             directDelivery: directDelivery)
     }
     
+    /// Launch failure is separate from onEnd, which reports child exit only.
+    public func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
+        callbackLock.lock()
+        defer { callbackLock.unlock() }
+        if let onLaunchFailure { onLaunchFailure(error) }
+        else { dataReceived(slice: Array("\r\nProcess launch failed: \(error)\r\n".utf8)[...]) }
+    }
+
     public func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
         callbackLock.lock()
         defer { callbackLock.unlock() }
+        terminal.terminalLock.withLock { terminal.programStatusProcessExited() }
         onEnd(exitCode)
     }
     
@@ -116,6 +130,29 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
     public func send(_ text: String) {
         send (data: ([UInt8] (text.utf8))[...])
         
+    }
+
+    /// Copies input modes and dimensions without copying any rows.
+    ///
+    /// Do not call this method from a terminal delegate callback that already
+    /// holds the terminal lock.
+    public func terminalInputStateSnapshot() -> TerminalInputStateSnapshot {
+        terminal.inputStateSnapshot()
+    }
+
+    /// Copies a region of a buffer, with its palette and the input state, in
+    /// one transaction.
+    ///
+    /// Do not call this method from a terminal delegate callback that already
+    /// holds the terminal lock.
+    ///
+    /// The snapshot is useful for inspection, text capture and re-encoding
+    /// as ANSI. It does not include images or hyperlinks.
+    public func terminalContentSnapshot(
+        region: TerminalContentRegion,
+        buffer: Terminal.BufferKind = .active
+    ) -> TerminalContentSnapshot {
+        terminal.contentSnapshot(region: region, buffer: buffer)
     }
 
     /// Changes scrollback size for the underlying terminal at runtime.
@@ -181,3 +218,5 @@ public class HeadlessTerminal : TerminalDelegate, LocalProcessDelegate {
 }
 
 #endif
+
+#endif // !SWIFTTERM_EMBEDDED

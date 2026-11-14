@@ -18,7 +18,8 @@ import Foundation
 
 /// A run of history lines of one buffer, top to bottom. Chunk 0 is the one nearest the screen.
 public struct TerminalHistoryChunk: Equatable, Sendable {
-    public static let formatVersion: UInt32 = 1
+    /// The snapshot's one format version (IT-2001 format v2).
+    public static let formatVersion: UInt32 = TerminalStateSnapshot.formatVersion
     static let magic: [UInt8] = Array("STSH".utf8)
 
     /// Which buffer the lines belong to.
@@ -90,13 +91,18 @@ extension Terminal {
     /// Exports the screen part and copies the history for ``TerminalStreamingExport``. Call
     /// under `terminalLock`, between feeds; the cost under the lock is the screen part plus a
     /// packed copy of each history line.
-    public func exportForStreaming() -> TerminalStreamingExport {
-        let screen = exportState(skippingHistory: true)
+    ///
+    /// Returns `nil`, like ``exportState()`` and from the same guard, when
+    /// ``hasPendingSequence`` is true: the caller must wait; the next feed that
+    /// returns the parser to ground ends the wait.
+    public func exportForStreaming() -> TerminalStreamingExport? {
+        guard let screen = exportState(skippingHistory: true) else { return nil }
         let arena = replicationCellArena.snapshotCopy()
         var history: [(isAlternate: Bool, cols: Int, rows: Int, lines: [BufferLine], promptRow: Int?)] = []
         for (isAlternate, buffer) in [(false, replicationNormalBuffer), (true, replicationAltBuffer)] {
             let count = min(buffer.replicationYBase, buffer.replicationLines.count)
-            guard count > 0 else { continue }
+            // The same rule as the screen part: only a buffer with scrollback streams history.
+            guard count > 0, buffer.replicationHasScrollback else { continue }
             var copies: [BufferLine] = []
             copies.reserveCapacity(count)
             for index in 0..<count { copies.append(buffer.replicationLines[index].replicationCopy(arena: arena)) }
@@ -117,21 +123,23 @@ extension Terminal {
     @discardableResult
     public func importHistoryChunk(_ chunk: TerminalHistoryChunk) -> Bool {
         let buffer = chunk.isAlternateBuffer ? replicationAltBuffer : replicationNormalBuffer
-        guard buffer.replicationCols == chunk.bufferCols, buffer.replicationRows == chunk.bufferRows else { return false }
-        var payloads: [String: TinyAtom] = [:]
-        let lines = chunk.lines.map { makeImportedLine($0, arena: buffer.replicationCellArena, payloads: &payloads) }
-        guard !lines.isEmpty else { return true }
+        guard buffer.replicationCols == chunk.bufferCols, buffer.replicationRows == chunk.bufferRows,
+              buffer.replicationHasScrollback else { return false }
+        guard !chunk.lines.isEmpty else { return true }
+        // Only the lines kept are built: the rest would be trimmed at once.
         let capacity = buffer.replicationLines.maxLength
-        let kept = max(0, min(lines.count, capacity - buffer.replicationLines.count))
-        let trimmed = lines.count - kept
+        let kept = max(0, min(chunk.lines.count, capacity - buffer.replicationLines.count))
+        let trimmed = chunk.lines.count - kept
+        var payloads: [String: TinyAtom] = [:]
+        let lines = chunk.lines[trimmed...].map { makeImportedLine($0, arena: buffer.replicationCellArena, payloads: &payloads) }
         if kept > 0 {
-            buffer.replicationLines.splice(start: 0, deleteCount: 0, items: Array(lines[trimmed...]), change: { _ in })
+            buffer.replicationLines.splice(start: 0, deleteCount: 0, items: lines, change: { _ in })
         }
         buffer.replicationLinesTop += trimmed
         buffer.replicationYBase += kept
         buffer.yDisp += kept
         if let row = chunk.semanticPromptStartRow, row >= trimmed {
-            buffer.replicationSemanticPromptStartLine = lines[row]
+            buffer.replicationSemanticPromptStartLine = lines[row - trimmed]
             buffer.replicationSemanticPromptStartRowCache = row - trimmed
         } else if buffer.replicationSemanticPromptStartLine != nil {
             buffer.replicationSemanticPromptStartRowCache += kept
@@ -174,10 +182,10 @@ extension TerminalHistoryChunk {
             throw TerminalStateSnapshotError.unsupportedVersion(version)
         }
         var r = SnapshotReader(bytes: bytes, position: 8)
-        let attributeCount = try r.count(max: bytes.count, "attribute table")
+        let attributeCount = try r.count(max: r.remaining, "attribute table")
         var attributes: [Attribute] = []
         for _ in 0..<attributeCount { attributes.append(try SnapshotCodec.readAttribute(&r)) }
-        let payloadCount = try r.count(max: bytes.count, "payload table")
+        let payloadCount = try r.count(max: r.remaining, "payload table")
         var payloads: [String] = []
         for _ in 0..<payloadCount { payloads.append(try r.string()) }
         isAlternateBuffer = try r.bool()
@@ -187,12 +195,35 @@ extension TerminalHistoryChunk {
         bufferCols = try r.count(max: 65535, "chunk cols")
         bufferRows = try r.count(max: 65535, "chunk rows")
         semanticPromptStartRow = try r.optional { try $0.uint() }
-        let lineCount = try r.count(max: bytes.count, "lines")
+        let lineCount = try r.count(max: r.remaining, "lines")
         var decoded: [LineImage] = []
         decoded.reserveCapacity(lineCount)
         for _ in 0..<lineCount { decoded.append(try LineImage(&r, attributes: attributes, payloads: payloads)) }
         lines = decoded
-        if let row = semanticPromptStartRow, row >= lines.count { throw TerminalStateSnapshotError.invalid("prompt row") }
         guard r.position == bytes.count else { throw TerminalStateSnapshotError.invalid("trailing bytes") }
+        try validate()
+    }
+
+    /// The invariants the exporter guarantees: a chunk is the normal buffer's (only a buffer with
+    /// scrollback streams history) and holds at least one line, each exactly as wide as the grid
+    /// it was exported at (a buffer with scrollback reflows, and the widen loop and the narrow
+    /// path resize every line to the new cols). Import checks that grid against the replica's
+    /// own. The cells' own checks run in the line decode.
+    func validate() throws {
+        func check(_ condition: Bool, _ what: String) throws {
+            guard condition else { throw TerminalStateSnapshotError.invalid(what) }
+        }
+        try check(bufferCols > 0 && bufferRows > 0, "chunk grid")
+        try check(!isAlternateBuffer, "chunk buffer")
+        try check(!lines.isEmpty, "chunk lines")
+        try check(lines.allSatisfy { $0.cols == bufferCols }, "chunk line width")
+        if let row = semanticPromptStartRow { try check(row < lines.count, "prompt row") }
+        // Import allocates every line of the chunk at its own width before trimming any.
+        var cells = 0
+        for line in lines {
+            let (sum, overflow) = cells.addingReportingOverflow(line.cols)
+            try check(!overflow && sum <= TerminalStateSnapshot.maximumCells, "chunk cells")
+            cells = sum
+        }
     }
 }
