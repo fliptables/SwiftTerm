@@ -2,11 +2,12 @@
 
 Branch `2001-upstream-merge-b`, fork PR #6. Merge of upstream `d4f52faaa` into the fork's
 `scape-selection-api` at `7ec59163a`; merge commit `e768bfa77`. The plan (rev 3) asks for this
-record in section 6, item 6. Line numbers are at `5450d92` unless a line says otherwise.
+record in section 6, item 6. Line numbers are at the head unless a line says otherwise.
 
-Sections are added as the work lands. Still to come: the whole-fork performance comparison against
-upstream, the inventory of fork code by path, format v2 and the census, C3's list of state changes
-with no byte, and the Linux baseline.
+Sections are added as the work lands. Still to come: format v2 and the census (v1's numbers are
+first: 137 stored fields in 9 types, TerminalStateSnapshotCoding.swift 720 lines; more than about
+twice the fields means stop and go to the lead), C3's list of state changes with no byte, and the
+Linux baseline at the head.
 
 ## D4: export only at ground (lead 14's ruling (B))
 
@@ -140,9 +141,38 @@ every cell's attribute through `getLine` and the subscript, 300 times. With setu
 - **Memory, computed:** the 896 KB of upstream's table (from `9500a26`) is virtual allocation. Pages
   that are never touched do not count toward the footprint.
 
-The trade-off between this read cost and this memory goes to Nash.
+Decided once, on this measurement: the lazy table is deleted and upstream's fixed table is back
+(+1.44% instructions per cell read, against a resident saving of about 29 KB per terminal; see "The
+fork only adds"). A render snapshot's arena does not touch the fixed table's untouched pages either:
+CellStorage.swift:375-387 allocates the capacity but initialises only `attributeCountValue` entries.
 
-## Inventory: every file under Sources/SwiftTerm that differs from d4f52faaa (at 01c422a)
+## Inventory at the head: every file under Sources/SwiftTerm that differs from d4f52faaa
+
+Sources as of builder #7's diagnostics deletion (the D7 gate as at `25d06b6`). Every fork line is an
+addition, except the 23 allow-listed lines ("The fork only adds"). The path is the most frequent
+one the fork code sits on.
+
+| File (+/-) | Path | What the fork adds |
+|---|---|---|
+| Terminal.swift (+315/-9) | per event; per feed: upstream's count | D8 reply gate (`sendQueryResponse`, added `guard respondsToQueries` lines) and `sendUserInputBytes`, per reply or user event. D7: one added block in `reconcileSynchronizedOutputWatchdog` after the dirty exit, calling the `@inline(never)` helper; the not-dirty feed path is upstream's 47 instructions. The `synchronizedOutputTimeout` setter. `hasPendingSequence`. The `isUserScrolling` forwarder (upstream's `userScrolling` untouched). `cold.respondsToQueries`, `cold.synchronizedOutputTimeoutDisabled`. `replication*` accessors (cold) |
+| ByteRunScanner.swift (+12) | per long run, Linux only | D9: one added `guard buffer.baseAddress != nil else { return start }` per vector scan; upstream's lines kept. Compiled only under `#else` of `#if compiler(>=6.4)` (see D9 below) |
+| Apple/AppleTerminalView.swift (+9/-7 changed-line form) | per frame (one optional) | D2: `pendingTitle` taken in `applyPendingViewUpdates` under the existing lock; `resizeSuspended` checks per resize |
+| Apple/TerminalViewScapeAccess.swift (+38, new) | cold | Scape's view API as forwarders (`withLockedTerminal`, `selectionService`, `mouseHit(with:)`) |
+| Apple/SynchronizedOutputWatchdog.swift (+7) | cold | `armedGeneration`, read by the D7 pins |
+| Mac/MacTerminalView.swift (+40/-13 changed-line form) | per event | `resizeSuspended`; the autoscroll hit test and extension under one lock (allow-listed); `scrollWheel` `open` (allow-listed); `alternateScreenWheelSendsCursorKeys` (default true); D2 titles |
+| iOS/iOSTerminalView.swift (+5/-5) | per event | D2 titles (allow-listed). Never built (see iOS below) |
+| Mac/MacLocalTerminalView.swift (+17) | per resize | D6: `windowSizeIsSendable` (0x0 and 1x1 send nothing) |
+| HeadlessTerminal.swift (+11) | per fed batch (headless only) | `onOutput?(slice)` under the lock |
+| KittyClipboardProtocol.swift (+2) | per event | D8 gate lines |
+| Pty.swift (+49) | per process launch (in the child) | close fds 3 ..< max(getdtablesize(), 10240) before exec (see Pty below) |
+| CharData.swift (+37) | per call (host) | `getText(maxUTF8Bytes:)` (IT-824); SwiftTerm does not call it |
+| Buffer.swift (+64), BufferLine.swift (+49) | cold | `replication*` accessors and constructors |
+| TerminalStateSnapshot (+605), …Coding (+720), TerminalHistoryStreaming (+202), TerminalReplicationDigest (+232) | cold (and ~4 M instructions once at launch) | export, import, codec, history chunks, test digest |
+
+TerminalEventQueue.swift, FrameDriver.swift, CellStorage.swift, SearchEngine.swift and
+SearchService.swift are upstream's byte for byte.
+
+## Inventory (SUPERSEDED, at 01c422a: CellStorage, Terminal, TerminalEventQueue and ByteRunScanner rows no longer hold)
 
 This answers the lead's question. Each file gets one line with the most frequent path its fork code
 sits on: **per byte**, **per cell**, **per frame**, **per event** (per reply, per post, per user
@@ -172,15 +202,12 @@ action, per resize), or **cold** (export or import, setup, API surface, compiled
 **What needed the lazy attribute table (CellArena).** Commit `9500a26` (IT-1016, 2026-09-23),
 "perf(CellArena): IT-1016 grow the attribute table lazily". Its stated case is memory. Every
 CellArena allocated its full 65,536-slot attribute table (896 KB) up front: one per terminal, plus
-one per render snapshot. Scape's production heap held 176 of them (about 160 MB), and almost none
-were touched. Live arenas now start at 256 slots and double. Snapshot arenas copy the source's
+one per render snapshot. Scape's production heap held 176 of them ("about 160 MB" is VIRTUAL
+size, not measured resident memory), and almost none were touched. Live arenas now start at 256 slots and double. Snapshot arenas copy the source's
 slot count and never grow. An outgrown table is retired, not freed, because a `PackedCellView`
 holds the arena `unowned(unsafe)`.
 
-No feature depends on it. It is a memory optimisation for Scape's many terminals and render
-snapshots. If it measures above the floor on the per-cell path, the alternative is upstream's
-fixed table, which brings back about 896 KB per arena. The case to make for keeping it is that
-memory figure, and the decision belongs to Nash.
+No feature depends on it. It was deleted on measurement (see "CellArena (per cell)" above).
 
 ## Assertion audit (plan section 8, last row)
 
@@ -616,4 +643,79 @@ feeds, the render thread included). RX - RU %, slot pair 1v2 / pair 4v3, then RU
 The scroll family is equal, or X is cheaper, so round 1's -0.9 to -2.7% MB/s (wall clock, load 23-33,
 focus taken) is closed as noise. dense_cells is above in both orders (+0.12/+0.10%), but X drew more
 frames per sample in both pairs (0.300 against 0.294), and frames follow wall time at 60 Hz. Its
-render instructions are inside the number. Headless dense_cells is launch only. One round.
+render instructions are inside the number. Headless dense_cells is launch only.
+
+**The rule that closes it, and round 2.** Lloyd's rule: one extra round. If the feed side is equal
+X against U within the A/A spread, it is closed as frame coupling. If the feed side is above in both
+orders, it goes to the lead with its count.
+
+Round 2 (the same 8 launches, load 16-29, frontmost app unchanged in all 8): dense_cells is
+**+0.176 / -0.100%** (A/A -0.163). It is not above in both orders, so it is closed. Across the two
+rounds, no case is above in both orders twice.
+
+The frame-coupling fit (instructions = a·samples + b·frames + c, `ab2-tools/fit_rb3.py`) is
+ill-conditioned: frames per sample vary by under 4% between runs (its A/A spread is ±5-24%), so it
+is not used. A per-thread split (feed thread against render thread) was not built, under the one-round
+time box.
+
+## Open facts at the head (builder #7, lead 15's read)
+
+**D9 is not measured against pure upstream.** Both A/B baselines are "U = `d4f52faaa` + D9", so D9
+sits on both sides. The facts:
+
+- Its three `guard buffer.baseAddress != nil` lines are compiled only under the `#else` of
+  `#if compiler(>=6.4)` in ByteRunScanner.swift ("Swift 6.3 has no checked RawSpan.load").
+- This Mac's toolchain is Apple Swift 6.4 (swiftlang-6.4.0.34.1), so on macOS the D9 lines are not
+  compiled: 0 instructions.
+- On Linux's Swift 6.2 container they are compiled: one nil compare and a branch per vector-scan
+  call, which is per long run (16 or more bytes past the scalar prefix), not per byte.
+- No production caller passes an empty span. firstC0Byte (:52), firstNonASCIIByte (:99) and
+  firstC0OrByte (:137) each `guard start < bytes.count` first, and call the vector scan only
+  `if bytes.count - index >= vectorWidth`.
+- What reached upstream's :208 trap in Linux L0 was upstream's own test:
+  ByteRunScannerTests.wordAndVectorScansAgreeWithScalarSearches :147 calls `vectorScanC0` directly,
+  and its iteration 0 has length 0.
+- Lead 15 ruled KEEP. The guard is reached only by upstream's direct test with length 0, and
+  production callers never pass fewer than 16 bytes. It goes away when the Linux toolchain
+  reaches 6.4. It is offered upstream on IT-2023 (upstream's force unwrap on an empty span is
+  their bug). No new pin.
+
+**Pty's close loop (D5).** The comment's own figure is "~32 ms at a 245k bound". On this Mac:
+
+- A shell-launched process sees getdtablesize = min(soft limit 1048576, kern.maxfilesperproc 245760)
+  = 245760. That is the ~32 ms case: a dev build launched from a terminal pays it in the child, per
+  session spawn.
+- A launchd-launched app with default limits (maxfiles 256) gets the 10240 floor.
+- Linux's number comes from the probe. The likely shape is close_range on Linux as an added `#if`;
+  nothing changes until that number is in.
+
+**iOS is never built.** AppleTerminalView.swift's `queueSizeChange` / `processSizeChange` read
+`resizeSuspended` inside `#if os(macOS) || os(iOS) || os(visionOS)`, but only MacTerminalView.swift
+declares it. So by reading, the file does not compile for iOS. This is pre-existing, at least since
+`7ec59163a` (its :1746/:1765).
+
+The only workflow with an iOS step (.github/workflows/xcode.yml) runs on pushes and PRs to `main`,
+and the fork's line targets `scape-selection-api`. The 5 iOS allow-list lines are therefore unproven
+by any build.
+
+**The only-adds pin's known limit.** It compares per-line 32-bit hashes as a subsequence. A deleted
+common line ("}" or a blank) is caught, unless the fork adds the same text later in the file. The
+pin proves that the upstream lines' ORDER survives, not where they are.
+
+**The D7 count's toolchain.** The count is 47 (U) / 54 (`ad15bc0`) / 47 (`25d06b6`) for the
+not-dirty path of a one-byte feed. It was taken with Apple Swift 6.4 (swiftlang-6.4.0.34.1),
+arm64-apple-macosx27.0, `swift build -c release --product SwiftTermProfile -Xswiftc -Xllvm -Xswiftc
+-align-all-functions=6`, counted from `Tools/feed-path-disasm.py`. A script guards it, not a test.
+The pin-bump PR and every later upstream merge re-run it and quote U against X.
+
+**Diagnostics nothing read: deleted (lead 15's rule: keep only what RenderBench or a test reads).**
+
+- Deleted: TerminalEventQueue's `scheduledHops` (field, getter, increment, reset), its `hopName`
+  extension and the `ProfilingHopCounter.record(event.hopName)` call; AppleTerminalView's
+  `Diagnostics.coalescedMainHops`, its assignment and the added `eventQueue.resetCounters()` in
+  `resetDiagnostics`; FrameDriver's `takePendingDirtyForTesting`.
+- RenderBench's `main_hops` column is upstream's `Diagnostics.mainHops` (counted in upstream's
+  `onMain`, AppleTerminalView.swift:1974), and its `coalesced=` column is upstream's
+  `renderLoopCoalesced`. Neither reads what was deleted.
+- Kept: `SynchronizedOutputWatchdog.armedGeneration` (read by SynchronizedOutputValveTests).
+- TerminalEventQueue.swift and FrameDriver.swift are upstream's again, byte for byte.
