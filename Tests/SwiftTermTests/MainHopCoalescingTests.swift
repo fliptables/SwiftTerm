@@ -188,6 +188,53 @@ struct MainHopCoalescingTests {
         #expect(delegate.titles == ["t9999"])
     }
 
+    /// Waits on the main actor (bounded) until `done` holds.
+    @MainActor
+    private static func waitOnMain(_ done: () -> Bool) async {
+        for _ in 0..<400 where !done() {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    /// A view that draws no frames still delivers its title (lead 14's D2
+    /// question): with no running tick source, `requestViewUpdate()` schedules
+    /// one main-actor delivery, and the driver applies view updates while
+    /// suspended. Nothing here calls `applyPendingViewUpdates` by hand.
+    @MainActor
+    @Test func aViewInNoWindowDeliversItsTitle() async {
+        let delegate = RecordingDelegate()
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
+        view.terminalDelegate = delegate
+        #expect(view.window == nil)
+
+        view.feed(text: "\(Self.esc)]0;detached\u{7}")
+        await Self.waitOnMain { !delegate.titles.isEmpty }
+
+        #expect(delegate.titles == ["detached"])
+    }
+
+    /// The same for a view in a window that is never shown (not visible, so
+    /// the frame driver is suspended), as a background tab's view is.
+    @MainActor
+    @Test func aViewInAHiddenWindowDeliversItsTitle() async {
+        let delegate = RecordingDelegate()
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 400, height: 100),
+                              styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
+        view.terminalDelegate = delegate
+        window.contentView?.addSubview(view)
+        #expect(view.window === window)
+        #expect(!window.isVisible)
+        #expect(view.frameDriver?.isVisibilitySuspended == true, "premise: the driver draws no frames")
+
+        view.feed(text: "\(Self.esc)]0;hidden\u{7}")
+        await Self.waitOnMain { !delegate.titles.isEmpty }
+
+        #expect(delegate.titles == ["hidden"])
+        view.removeFromSuperview()
+    }
+
     /// Nothing is delivered to the delegate after the view is gone.
     @MainActor
     @Test func nothingDeliveredAfterViewTeardown() async throws {
