@@ -165,6 +165,100 @@ final class ReplicationFormatV2Tests {
         #expect(recorder.firstLineAtCall.allSatisfy { $0 == "owner" }, "a delegate call saw the old buffers: \(recorder.firstLineAtCall)")
     }
 
+    // MARK: Decode validation (keystone 17's read, via Lloyd 16B314D0)
+
+    /// A valid snapshot with a cell, a grapheme, history and the alternate screen in use.
+    private static func validSnapshot() throws -> TerminalStateSnapshot {
+        let owner = make()
+        owner.feed(text: (0..<20).map { "line \($0)\r\n" }.joined() + "e\u{301} x")
+        return try #require(owner.exportState())
+    }
+
+    /// Edits one field of a valid snapshot's image, re-encodes it, and expects decode to refuse it.
+    private static func refuses(_ what: String, _ edit: (inout TerminalStateSnapshot) -> Void) throws {
+        var snapshot = try validSnapshot()
+        edit(&snapshot)
+        let bytes = snapshot.encoded()
+        #expect(throws: TerminalStateSnapshotError.self, "\(what) decoded") { try TerminalStateSnapshot(encoded: bytes) }
+    }
+
+    /// (a) Terminal keeps exactly four G0-G3 sets (Terminal.swift setup), and gLevel indexes them.
+    @Test func decodeRefusesAWrongCharsetTable() throws {
+        try Self.refuses("3 charsets") { $0.modes.gCharsets.removeLast() }
+        try Self.refuses("5 charsets") { $0.modes.gCharsets.append(nil) }
+        try Self.refuses("gLevel 4") { $0.modes.gLevel = 4 }
+    }
+
+    /// (b) A TAB reads tabStops[x] for every x < cols.
+    @Test func decodeRefusesShortTabStops() throws {
+        try Self.refuses("no tab stops") { $0.normal.tabStops = [] }
+        try Self.refuses("tab stops short by one") { $0.normal.tabStops.removeLast() }
+    }
+
+    /// (c) Every cell scalar and grapheme scalar must be one the arena stores.
+    @Test func decodeRefusesAnInvalidScalar() throws {
+        try Self.refuses("surrogate code") { $0.normal.lines[0].cells[0].code = 0xD800 }
+        try Self.refuses("code above U+10FFFF") { $0.normal.lines[0].cells[0].code = 0x110000 }
+        try Self.refuses("negative code") { $0.normal.lines[0].cells[0].code = -5 }
+        try Self.refuses("surrogate grapheme") { snapshot in
+            let row = snapshot.normal.lines.firstIndex { $0.cells.contains { $0.graphemes != nil } }!
+            let column = snapshot.normal.lines[row].cells.firstIndex { $0.graphemes != nil }!
+            snapshot.normal.lines[row].cells[column].graphemes = [0x65, 0xDC00]
+        }
+    }
+
+    /// (d) Dimensions and positions import assigns unchecked.
+    @Test func decodeRefusesAPositionOutsideTheGrid() throws {
+        try Self.refuses("buffer cols != modes cols") { $0.normal.cols = 31 }
+        try Self.refuses("alt rows != modes rows") { $0.alt.rows = 7 }
+        // An alternate buffer never activated exports 0 lines (observed): 0 is allowed, 1..<rows is not.
+        try Self.refuses("fewer lines than rows") { $0.normal.lines = Array($0.normal.lines.prefix(7)); $0.normal.yBase = 0; $0.normal.yDisp = 0 }
+        try Self.refuses("a line wider than the buffer") { $0.normal.lines[0].cols = 31 }
+        try Self.refuses("x past cols") { $0.normal.x = 31 }
+        try Self.refuses("savedX past cols") { $0.normal.savedX = 31 }
+        try Self.refuses("y at rows") { $0.normal.y = 8 }
+        try Self.refuses("savedY at rows") { $0.normal.savedY = 8 }
+        try Self.refuses("negative savedY") { $0.normal.savedY = -1 }
+        try Self.refuses("scrollTop after scrollBottom") { $0.normal.scrollTop = 5; $0.normal.scrollBottom = 4 }
+        try Self.refuses("scrollBottom at rows") { $0.normal.scrollBottom = 8 }
+        try Self.refuses("marginLeft after marginRight") { $0.normal.marginLeft = 10; $0.normal.marginRight = 9 }
+        try Self.refuses("marginRight at cols") { $0.normal.marginRight = 30 }
+        try Self.refuses("negative marginLeft") { $0.normal.marginLeft = -1 }
+        try Self.refuses("yBase past the lines") { $0.normal.yBase = $0.normal.lines.count - 7 }
+        try Self.refuses("yDisp past the lines") { $0.normal.yDisp = $0.normal.lines.count - 7 }
+        try Self.refuses("negative linesTop") { $0.normal.linesTop = -1 }
+        try Self.refuses("scrollback past upstream's clamp") { $0.normal.scrollback = Int(Int32.max) }
+        try Self.refuses("line capacity below rows") { $0.normal.lineCapacity = 7 }
+        try Self.refuses("line capacity below the lines held") { $0.normal.lineCapacity = $0.normal.lines.count - 1 }
+    }
+
+    /// The positive side: snapshots of live terminals in the states the invariants are most
+    /// likely to get wrong still decode (pending wrap at the last column, a scrolled view, the
+    /// alternate screen, a margin region, a resize smaller and back). The every-cut corpus
+    /// (TerminalStateSnapshotTests.everyCutReplicates, everyParserClauseCutReplicates) and the
+    /// streaming tests decode every export they make, so they are the wider positive check.
+    @Test func liveExportsInEdgeStatesStillDecode() throws {
+        let streams: [(String, (Terminal) -> Void)] = [
+            ("pending wrap", { $0.feed(text: String(repeating: "x", count: 30)) }),
+            ("saved at the last column", { $0.feed(text: String(repeating: "x", count: 30) + "\u{1b}7") }),
+            ("scrolled history", { $0.feed(text: (0..<80).map { "l\($0)\r\n" }.joined()) }),
+            ("alternate screen", { $0.feed(text: "a\r\n\u{1b}[?1049hb\u{1b}[3;5r\u{1b}[?69h\u{1b}[2;9s") }),
+            ("resize smaller", { t in t.feed(text: (0..<60).map { "l\($0)\r\n" }.joined()); t.resize(cols: 20, rows: 5) }),
+            ("resize smaller and back", { t in
+                t.feed(text: (0..<60).map { "l\($0)\r\n" }.joined()); t.resize(cols: 12, rows: 4); t.resize(cols: 30, rows: 8)
+            }),
+            ("alt screen resized", { t in t.feed(text: "\u{1b}[?1049hxyz"); t.resize(cols: 40, rows: 10) }),
+        ]
+        for (name, setUp) in streams {
+            let owner = Self.make()
+            setUp(owner)
+            let snapshot = try #require(owner.exportState(), "\(name): no export")
+            #expect(throws: Never.self, "\(name)") { _ = try TerminalStateSnapshot(encoded: snapshot.encoded()) }
+            let streaming = try #require(owner.exportForStreaming(), "\(name): no streaming export")
+            #expect(throws: Never.self, "\(name) (screen part)") { _ = try TerminalStateSnapshot(encoded: streaming.screen.encoded()) }
+        }
+    }
+
     #if os(macOS)
     @MainActor private func drainMainQueue() async {
         await withCheckedContinuation { continuation in
