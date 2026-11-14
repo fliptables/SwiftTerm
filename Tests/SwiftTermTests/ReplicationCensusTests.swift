@@ -37,6 +37,8 @@ final class ReplicationCensusTests {
         "cursorStartsNewGrapheme", "terminalTitle", "iconTitle", "terminalTitleStack",
         "terminalIconStack", "visibilityReportsEnabled", "inBandSizeReportsEnabled",
         "kittyPasteEventsEnabled",
+        // CSI 20 h/l (LNM) and CSI ? 4 h/l (DECSCLM) write them; DECRQM answers both.
+        "lineFeedMode", "smoothScroll",
         // Named holders: their own properties are listed in carriedHolder.
         "cold", "reportedOnly",
     ]
@@ -56,6 +58,12 @@ final class ReplicationCensusTests {
         "defaultBidiState",
     ]
 
+    /// The third class (lead 15, 03:17Z): construction parameters. No parsed byte writes
+    /// them, but import BUILDS the replica's buffers from them, so they are carried and
+    /// digested: the replica matches the owner whatever its own options say.
+    static let constructionTerminal: Set<String> = []
+    static let constructionBuffer: Set<String> = ["scrollback"]
+
     static let carriedLine: Set<String> = [
         "isWrappedValue", "bidiStateValue", "renderModeValue", "semanticMarksValue",
         "semanticHardContinuationGroupValue",
@@ -72,13 +80,16 @@ final class ReplicationCensusTests {
         return paths
     }
 
-    private static func check(_ what: String, reflected: [String], carried: Set<String>, excluded: Set<String>) {
+    private static func check(_ what: String, reflected: [String], carried: Set<String>, excluded: Set<String>,
+                              construction: Set<String> = []) {
         let names = Set(reflected)
         #expect(names.count == reflected.count, "\(what): a label appears twice")
         #expect(carried.isDisjoint(with: excluded), "\(what) both carried and excluded: \(carried.intersection(excluded).sorted())")
-        let missing = names.subtracting(carried).subtracting(excluded)
+        #expect(construction.isDisjoint(with: excluded), "\(what) both construction and excluded: \(construction.intersection(excluded).sorted())")
+        #expect(construction.isDisjoint(with: carried), "\(what) both construction and carried: \(construction.intersection(carried).sorted())")
+        let missing = names.subtracting(carried).subtracting(excluded).subtracting(construction)
         #expect(missing.isEmpty, "\(what) neither carried nor excluded: \(missing.sorted())")
-        let stale = carried.union(excluded).subtracting(names)
+        let stale = carried.union(excluded).union(construction).subtracting(names)
         #expect(stale.isEmpty, "\(what) census names that are not stored properties: \(stale.sorted())")
     }
 
@@ -86,11 +97,13 @@ final class ReplicationCensusTests {
         let terminal = Terminal(delegate: Sink())
         let mirror = Terminal.terminalMirror(terminal)
         Self.check("Terminal", reflected: mirror.children.compactMap(\.label), carried: Self.carriedTerminal,
-                   excluded: Set(Terminal.digestExcludedTerminalPropertiesOnThisBuild.keys))
+                   excluded: Set(Terminal.digestExcludedTerminalPropertiesOnThisBuild.keys),
+                   construction: Self.constructionTerminal)
         Self.check("holders", reflected: Self.reflectedHolderPaths(terminal), carried: Self.carriedHolder,
                    excluded: Set(Terminal.digestExcludedHolderProperties.keys))
         Self.check("Buffer", reflected: Mirror(reflecting: terminal.buffer).children.compactMap(\.label),
-                   carried: Self.carriedBuffer, excluded: Set(Terminal.digestExcludedBufferPropertiesOnThisBuild.keys))
+                   carried: Self.carriedBuffer, excluded: Set(Terminal.digestExcludedBufferPropertiesOnThisBuild.keys),
+                   construction: Self.constructionBuffer)
         Self.check("BufferLine", reflected: Mirror(reflecting: terminal.buffer.lines[0]).children.compactMap(\.label),
                    carried: Self.carriedLine, excluded: Set(Terminal.digestExcludedLineProperties.keys))
         // A named holder must be there, as a class instance, when the digest reflects it.
@@ -136,8 +149,12 @@ final class ReplicationCensusTests {
             .union(carriedLine.map { "line." + $0 })
     }
 
+    /// Terminal holds its delegate weakly: a `Sink()` made inline is gone at once, and then
+    /// OSC 6 (isProcessTrusted ?? false) and XTWINOPS (`guard let tdel`) do nothing.
+    nonisolated(unsafe) private static let sink = Sink()
+
     static func fresh() -> Terminal {
-        let terminal = Terminal(delegate: Sink(), options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
+        let terminal = Terminal(delegate: Self.sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.synchronizedOutputTimeout = nil
         return terminal
     }
@@ -203,17 +220,20 @@ final class ReplicationCensusTests {
         "terminal.colorScheme": { $0.updateColorScheme(.light) },
         "terminal.colorSchemeUpdatesEnabled": b("\u{1b}[?2031h"),
         "terminal.conformance": b("\u{1b}[61\"p"),
-        // OSC 6 needs a trusting delegate; the field is set as OSC 6 sets it.
-        "terminal.hostCurrentDocument": { $0.replicationHostCurrentDocument = "file://host/doc" },
+        // OSC 6 (oscSetCurrentDocument) needs a trusting delegate: the default isProcessTrusted is true.
+        "terminal.hostCurrentDocument": b("\u{1b}]6;file://host/doc\u{7}"),
         "terminal.inBandSizeReportsEnabled": b("\u{1b}[?2048h"),
         "terminal.kittyPasteEventsEnabled": b("\u{1b}[?5522h"),
         "terminal.visibilityReportsEnabled": b("\u{1b}[?2033h"),
         "terminal.mouseShiftCapture": b("\u{1b}[>1s"),
         "terminal.reverseColors": b("\u{1b}[?5h"),
         "terminal.reverseWraparound": b("\u{1b}[?45h"),
-        // Set as XTSAVE and XTWINOPS 22;1 set them.
-        "terminal.savedPrivateModes": { $0.replicationSavedPrivateModes = [2004: true] },
-        "terminal.terminalIconStack": { $0.replicationTerminalIconStack = ["icon"] },
+        // XTSAVE (cmdSavePrivateModes) saves only modes readDECPrivateMode knows: 2004 is one.
+        "terminal.savedPrivateModes": b("\u{1b}[?2004h\u{1b}[?2004s"),
+        // XTWINOPS 22;1 (cmdWindowOptions) pushes the icon title; it needs a delegate (fresh() has one).
+        "terminal.terminalIconStack": b("\u{1b}]1;icon\u{7}\u{1b}[22;1t"),
+        "terminal.lineFeedMode": b("\u{1b}[20h"),
+        "terminal.smoothScroll": b("\u{1b}[?4h"),
         "terminal.xtermTitleSetHex": b("\u{1b}[>0t"),
         "terminal.xtermTitleQueryHex": b("\u{1b}[>1t"),
         "terminal.xtermTitleSetUtf": b("\u{1b}[>2t"),
@@ -228,6 +248,38 @@ final class ReplicationCensusTests {
         #expect(rows.subtracting(needed).isEmpty, "hand rows the corpus already covers (delete them): \(rows.subtracting(needed).sorted())")
         #expect(needed.subtracting(rows).isEmpty, "carried fields in neither the corpus nor a hand row: \(needed.subtracting(rows).sorted())")
         print("CENSUS carried=\(Self.carriedPaths.count) corpus=\(covered.count) hand=\(rows.count)")
+    }
+
+    /// A construction parameter: a replica built with OTHER options (the app's viewer, a
+    /// smaller scrollback) gets the owner's after import, and the digest compares it.
+    @Test func aConstructionParameterIsTheOwnersAfterImport() throws {
+        let owner = Terminal(delegate: Self.sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
+        owner.synchronizedOutputTimeout = nil
+        owner.feed(text: (0..<20).map { "line \($0)\r\n" }.joined())
+        let replica = Terminal(delegate: Self.sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 10))
+        replica.synchronizedOutputTimeout = nil
+        replica.respondsToQueries = false
+        let differing = Self.fields(owner.replicationDigest()).filter { Self.fields(replica.replicationDigest())[$0.key] != $0.value }
+        #expect(differing["buffer.scrollback"] != nil, "the digest does not compare scrollback")
+        replica.importState(try TerminalStateSnapshot(encoded: try #require(owner.exportState()).encoded()))
+        #expect(replica.normalBuffer.replicationScrollback == 50)
+        #expect(replica.altBuffer.replicationScrollback == owner.altBuffer.replicationScrollback)
+        #expect(owner.replicationDigest() == replica.replicationDigest())
+    }
+
+    /// tabStopWidth is EXCLUDED, not a construction parameter, because it is 8 on every
+    /// terminal: upstream never reads TerminalOptions.tabStopWidth (IT-2023). This pin FAILS
+    /// the day upstream honours the option; then tabStopWidth must become a construction
+    /// parameter like scrollback (carried, census third class), not stay excluded.
+    @Test func tabStopWidthIgnoresTheOptionSoItCarriesNothing() {
+        let four = Terminal(delegate: Self.sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50, tabStopWidth: 4))
+        let eight = Terminal(delegate: Self.sink, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50, tabStopWidth: 8))
+        // Read by reflection: the format and its accessors no longer name the field.
+        func width(_ terminal: Terminal) -> Int? {
+            Terminal.terminalMirror(terminal).children.first { $0.label == "tabStopWidth" }?.value as? Int
+        }
+        #expect(width(four) == 8 && width(eight) == 8,
+                "upstream now honours options.tabStopWidth: reclassify tabStopWidth as a construction parameter")
     }
 
     /// A hand row changes its field on a fresh terminal (two terminals differing there digest

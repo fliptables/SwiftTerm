@@ -125,6 +125,46 @@ final class ReplicationFormatV2Tests {
         #expect(replica.kittyGraphicsAdvanceAnimations(monotonicNanoseconds: 1 << 62) == nil)
     }
 
+    /// Lead 15 (03:17Z, Q1): a field no parsed byte writes carries nothing between owner and
+    /// replica and is not in the format (each one's write sites are quoted in the commit that
+    /// dropped it); the construction parameters stay.
+    @Test func theFormatHoldsNoFieldThatNoByteWrites() throws {
+        let snapshot = try #require(Self.make().exportState())
+        let modes = Set(Mirror(reflecting: snapshot.modes).children.compactMap(\.label))
+        let buffer = Set(Mirror(reflecting: snapshot.normal).children.compactMap(\.label))
+        for dropped in ["gcharset", "tabStopWidth"] { #expect(!modes.contains(dropped), "modes still carries \(dropped)") }
+        for dropped in ["xDisp", "xBase", "hasScrollback"] { #expect(!buffer.contains(dropped), "buffer still carries \(dropped)") }
+        #expect(modes.isSuperset(of: ["lineFeedMode", "smoothScroll"]))
+        #expect(buffer.contains("scrollback"))
+    }
+
+    /// Delegate notifications during import (program status, the three colours) see the
+    /// imported buffers: each one comes after the buffers are replaced.
+    @Test func importTellsTheDelegateAfterTheBuffersAreReplaced() throws {
+        final class Recorder: TerminalDelegate {
+            var firstLineAtCall: [String] = []
+            func send(source: Terminal, data: ArraySlice<UInt8>) {}
+            private func note(_ source: Terminal) {
+                firstLineAtCall.append(source.buffer.lines[0].translateToString(trimRight: true))
+            }
+            func setForegroundColor(source: Terminal, color: Color) { note(source) }
+            func setBackgroundColor(source: Terminal, color: Color) { note(source) }
+            func setCursorColor(source: Terminal, color: Color?) { note(source) }
+            func programStatusChanged(source: Terminal, records: [TerminalProgramStatus]) { note(source) }
+        }
+        let owner = Self.make()
+        owner.feed(text: "owner\u{1b}]10;rgb:11/22/33\u{7}\u{1b}]11;rgb:44/55/66\u{7}\u{1b}]12;rgb:77/88/99\u{7}"
+                   + "\u{1b}]7501;state=working:id=a\u{1b}\\")
+        let recorder = Recorder()
+        let replica = Terminal(delegate: recorder, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
+        replica.synchronizedOutputTimeout = nil
+        replica.feed(text: "replica")
+        recorder.firstLineAtCall.removeAll()
+        try Self.replicate(owner, into: replica)
+        #expect(recorder.firstLineAtCall.count >= 4, "calls: \(recorder.firstLineAtCall)")
+        #expect(recorder.firstLineAtCall.allSatisfy { $0 == "owner" }, "a delegate call saw the old buffers: \(recorder.firstLineAtCall)")
+    }
+
     #if os(macOS)
     @MainActor private func drainMainQueue() async {
         await withCheckedContinuation { continuation in
