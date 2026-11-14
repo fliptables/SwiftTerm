@@ -167,6 +167,17 @@ final class UpstreamOnlyAddsTests {
         #expect(!terminal.isUserScrolling)
     }
 
+#if os(macOS)
+    /// Scape's view API (TerminalViewScapeAccess.swift) forwards to upstream's
+    /// internal members, whose access is upstream's again.
+    @MainActor
+    @Test func theViewForwardersReachUpstreamsMembers() {
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        #expect(view.selectionService === view.selection)
+        #expect(view.withLockedTerminal { $0.cols } == view.withTerminal { $0.cols })
+    }
+#endif
+
     // MARK: helpers
 
     struct ManifestFile {

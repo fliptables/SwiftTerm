@@ -1567,8 +1567,7 @@ extension TerminalView {
             })
     }
 
-    // Scape fork: `public` visibility grant.
-    public typealias CellDimension = CGSize
+    typealias CellDimension = CGSize
 
     // Reads the viewStateLock-guarded mirror of `terminal.reverseColors`,
     // refreshed synchronously by the colorChanged delegate (which DECSCNM
@@ -1757,10 +1756,7 @@ extension TerminalView {
     /// The closure must not call another API that synchronously acquires the
     /// terminal lock. Helpers that assume the lock is held use the `Locked`
     /// suffix and assert that contract in DEBUG builds.
-    /// (Scape fork: `public` visibility grant — replaces the removed
-    /// `getTerminal()` accessor; the host app takes lock-scoped access instead
-    /// of an unlocked terminal reference.)
-    public func withTerminal<T> (_ body: (Terminal) throws -> T, caller: StaticString = #function) rethrows -> T
+    func withTerminal<T> (_ body: (Terminal) throws -> T, caller: StaticString = #function) rethrows -> T
     {
         if ProfilingStats.enabled && Thread.isMainThread {
             ProfilingLockCallers.shared.record(caller)

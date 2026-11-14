@@ -291,8 +291,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
     var accessibility: AccessibilityService = AccessibilityService()
     /// The selection VoiceOver last heard of.
     var accessibilitySelection: SnapshotSelectionState = .empty
-    // IT-2001: D10. `public` kept from the fork.
-    public var search: SearchService!
+    var search: SearchService!
     private var findBar: TerminalFindBarView?
     private var findBarTerm: String = ""
     private var findBarOptions: SearchOptions = SearchOptions()
@@ -481,8 +480,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
 
 #endif
 
-    // IT-2001: D10. `public` kept from the fork.
-    public var cellDimension: CellDimension!
+    var cellDimension: CellDimension!
     /// The backing scale `cellDimension` was snapped to; see `computeFontDimensions`.
     var cellDimensionBackingScale: CGFloat = 1
     var caretView: CaretView!
@@ -506,8 +504,7 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
 
     /// Tracks the selection state of the terminal, and can be used to set it
     /// programmatically (see `SelectionService`).
-    /// (Scape fork: `public` visibility grant — Scape reads/drives selection.)
-    public var selection: SelectionService!
+    var selection: SelectionService!
     private var scroller: NSScroller!
     private var overlayScrollerIndicator: OverlayScrollerIndicator!
     private var overlayScrollerHideTimer: Timer?
@@ -2795,13 +2792,13 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         return terminal.encodeButton(button: button, release: isReleaseEvent, shift: flags.contains(.shift), meta: flags.contains(.option), control: flags.contains(.control))
     }
     
-    public func calculateMouseHit (with event: NSEvent) -> (grid: Position, pixels: Position)
+    func calculateMouseHit (with event: NSEvent) -> (grid: Position, pixels: Position)
     {
         let point = convert(event.locationInWindow, from: nil)
         return calculateMouseHit(at: point)
     }
 
-    public func calculateMouseHit (at point: CGPoint) -> (grid: Position, pixels: Position)
+    func calculateMouseHit (at point: CGPoint) -> (grid: Position, pixels: Position)
     {
         withTerminal { _ in
             calculateMouseHitLocked(at: point)
