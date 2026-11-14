@@ -37,6 +37,7 @@ let usage = """
     usage: RenderBench [--metal] [--seconds N] [--scenario dense|medium|scroll|arabic|arabic-line|stalled-frame]
            RenderBench [--metal] [--seconds N] --vtebench NAME|all
            RenderBench --list-vtebench
+           (vtebench extras: --samples N ends each case after N feeds; --no-activate never takes focus)
     """
 
 var seconds = 15.0
@@ -45,6 +46,12 @@ var scenario = "dense"
 var scenarioWasSpecified = false
 var vteBenchSelection: String?
 var listVTEBenchWorkloads = false
+/// Fork addition (IT-2001): show the window without activating the app, so it never
+/// becomes key and keyboard focus stays where it was.
+var noActivate = false
+/// Fork addition (IT-2001): end each vtebench case after this many whole-sample feeds
+/// instead of after `seconds`, so instruction counts of two builds are comparable.
+var sampleLimit: Int?
 
 var argIterator = CommandLine.arguments.dropFirst().makeIterator()
 while let argument = argIterator.next() {
@@ -72,6 +79,14 @@ while let argument = argIterator.next() {
         vteBenchSelection = selection
     case "--list-vtebench":
         listVTEBenchWorkloads = true
+    case "--no-activate":
+        noActivate = true
+    case "--samples":
+        guard let value = argIterator.next(), let parsed = Int(value), parsed > 0 else {
+            print("--samples requires a whole number greater than zero")
+            exit(1)
+        }
+        sampleLimit = parsed
     case "--help", "-h":
         print(usage)
         exit(0)
@@ -294,8 +309,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminalView = TerminalView(frame: window.contentView!.bounds)
         terminalView.terminalDelegate = terminalViewDelegate
         window.contentView!.addSubview(terminalView)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if noActivate {
+            window.orderFrontRegardless()
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         if useMetal {
             do {
@@ -446,7 +465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                          workload.name, lastReportedSecond, frameCount, mbps))
         }
 
-        if elapsed >= seconds {
+        if sampleLimit.map({ frameCount >= $0 }) ?? (elapsed >= seconds) {
             finishVTEBenchMeasurement(elapsed: elapsed)
             return
         }
@@ -543,7 +562,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(noActivate ? .accessory : .regular)
 let appDelegate = AppDelegate()
 app.delegate = appDelegate
 app.run()
