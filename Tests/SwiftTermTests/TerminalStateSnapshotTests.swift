@@ -20,7 +20,6 @@ final class TerminalStateSnapshotTests {
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.respondsToQueries = responds
         terminal.synchronizedOutputTimeout = nil
-        terminal.recordsPendingParserBytes = true
         return terminal
     }
 
@@ -58,8 +57,16 @@ final class TerminalStateSnapshotTests {
             let ownerCapture = Capture()
             let owner = make(ownerCapture, responds: true)
             for step in units[..<cut] { apply(step, to: owner) }
+            // Export only at ground (IT-2001 D4, ruling B): a cut inside a
+            // sequence or a UTF-8 character waits; ExportAtGroundTests pins it.
+            if owner.hasPendingSequence {
+                if owner.exportState() != nil || owner.exportForStreaming() != nil {
+                    return "cut \(cut): exported while a sequence or character is open"
+                }
+                continue
+            }
             guard let snapshot = owner.exportState() else {
-                return "cut \(cut): the export refused (wait) with pendingParserBytes \(String(describing: owner.pendingParserBytes))"
+                return "cut \(cut): a ground cut refused to export"
             }
             let encoded = snapshot.encoded()
             guard let decoded = try? TerminalStateSnapshot(encoded: encoded) else {

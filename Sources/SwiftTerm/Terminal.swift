@@ -892,51 +892,14 @@ open class Terminal {
         parser.reset(self)
     }
 
-    /// The parser's own record of the open sequence (no putback), for the
-    /// IT-2001 D4 flag tests.
-    var parserRecordForTesting: [UInt8] { parser.pendingSequenceBytes }
-
     /// True when the parser holds input it has only partly read: an
     /// unfinished escape, control or string sequence, or the first bytes of a
-    /// UTF-8 character. Read under `terminalLock`, between feeds.
-    public var hasPendingSequence: Bool {
-        parser.currentState != .ground || parser.pendingSequenceOverflowed
-            || !readingBuffer.putbackBuffer.isEmpty
-    }
-
-    /// Whether the parser records the sequence it has open, so that
-    /// ``pendingParserBytes`` can report it and ``exportState()`` can export
-    /// mid-sequence. Default `false`: the record costs parse time, so only a
-    /// terminal that exports turns it on, before its first feed. Set under
-    /// `terminalLock`, between feeds.
-    ///
-    /// At ground ``pendingParserBytes`` is `[]` (plus any partial UTF-8
-    /// character) whether this is on or off. Inside a sequence the record does
-    /// not cover, it is `nil`, "wait": with this off; or after turning it on
-    /// while that sequence was open. The next feed that
-    /// returns the parser to ground (or starts a new sequence, with this on)
-    /// ends the wait. Turning it off empties the recorded bytes.
-    /// ``hasPendingSequence`` does not depend on it.
-    public var recordsPendingParserBytes: Bool {
-        get { parser.recordsPendingBytes }
-        set { parser.recordsPendingBytes = newValue }
-    }
-
-    /// The bytes the parser holds from an unfinished sequence, verbatim, so a
-    /// second terminal fed them resumes in the same parser state. A C0 control
-    /// executed inside the sequence is left out, because its effect is already
-    /// in this terminal's state. Empty when ``hasPendingSequence`` is false.
-    /// `nil` means "wait": a sequence is open that the parser has not
-    /// recorded (``recordsPendingParserBytes`` is off, or was turned on inside
-    /// it, or it is larger than the parser keeps, as an image transfer), so
-    /// no snapshot can be taken (``exportState()`` returns `nil`); the next
+    /// UTF-8 character. While it is true, ``exportState()`` and
+    /// ``exportForStreaming()`` return `nil`: the caller must wait; the next
     /// feed that returns the parser to ground ends the wait. Read under
     /// `terminalLock`, between feeds.
-    public var pendingParserBytes: [UInt8]? {
-        if parser.pendingSequenceOverflowed { return nil }
-        if !parser.recordsPendingBytes && parser.currentState != .ground { return nil }
-        if readingBuffer.putbackBuffer.isEmpty { return parser.pendingSequenceBytes }
-        return readingBuffer.putbackBuffer + parser.pendingSequenceBytes
+    public var hasPendingSequence: Bool {
+        parser.currentState != .ground || !readingBuffer.putbackBuffer.isEmpty
     }
 
     /// Whether this terminal answers the queries it parses (device
@@ -11012,8 +10975,21 @@ extension Terminal {
     var replicationAltBuffer: Buffer { get { altBuffer } set { altBuffer = newValue } }
     /// The active buffer. Set it to ``replicationNormalBuffer`` or ``replicationAltBuffer``.
     var replicationActiveBuffer: Buffer { get { _buffer } set { _buffer = newValue } }
-    /// The parser's state between feeds (tests only: the D4 every-cut pin).
-    var replicationParserState: [String] { parser.replicationStateDescription }
+    /// The parser's state between feeds, one line per field, for tests (the
+    /// D4 export-at-ground pins). Reads upstream's parser fields; the parser
+    /// file itself carries no fork code.
+    var replicationParserState: [String] {
+        var lines = ["state = \(parser.currentState)"]
+        guard parser.currentState != .ground else { return lines }
+        var pars = parser._pars
+        let parameters = pars.withView { Array($0) }
+        lines.append("osc = \(parser._osc) limit \(parser._oscLimitExceeded) ignoredPrefix \(parser._oscIgnoredPrefixBytes)")
+        lines.append("apc = \(parser._apc) limit \(parser._apcLimitExceeded)")
+        lines.append("pars = \(parameters) colonMask \(parser._parsColonMask) limit \(parser._parameterLimitExceeded)")
+        lines.append("collect = \(parser._collect)")
+        lines.append("dcsHandler = \(parser.activeDcsHandler.map { String(describing: type(of: $0)) } ?? "none")")
+        return lines
+    }
     var replicationKittyGraphicsActiveIsAlternate: Bool {
         get { kittyGraphicsState.activeIsAlternate }
         set { kittyGraphicsState.activeIsAlternate = newValue }

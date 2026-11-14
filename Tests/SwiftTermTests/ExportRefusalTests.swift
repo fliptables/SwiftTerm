@@ -3,11 +3,13 @@ import Foundation
 import Testing
 @_spi(Replication) @testable import SwiftTerm
 
-/// IT-2001 D4 (lead 14, the export's refusal): when ``Terminal/pendingParserBytes``
-/// is nil the open sequence is not recorded, and a snapshot taken then would
-/// tell a replica the parser is in ground while the owner is mid-sequence. Both
+/// IT-2001 D4 (lead 14, the export's refusal; ruling (B), export only at
+/// ground): while ``Terminal/hasPendingSequence`` is true a snapshot would tell
+/// a replica the parser is in ground while the owner is mid-sequence. Both
 /// export entry points then return nil ("wait"), from one guard, and change
-/// nothing; the next feed that returns the parser to ground ends the wait.
+/// nothing; the next feed that returns the parser to ground ends the wait. An
+/// over-large open sequence is one more wait (before this PR it exported an
+/// empty pending field: a defect).
 final class ExportRefusalTests {
     private final class Capture: TerminalDelegate {
         var sent: [UInt8] = []
@@ -18,22 +20,21 @@ final class ExportRefusalTests {
         let terminal = Terminal(delegate: Capture(), options: TerminalOptions(cols: 30, rows: 8, scrollback: 50))
         terminal.respondsToQueries = responds
         terminal.synchronizedOutputTimeout = nil
-        terminal.recordsPendingParserBytes = true
         return terminal
     }
 
-    /// An OSC 52 body larger than the parser keeps: the record overflows.
+    /// An OSC 52 body of 300 KiB, still open.
     private static let overLarge: [UInt8] = Array("x\u{1b}]52;c;".utf8)
-        + [UInt8](repeating: 0x41, count: EscapeSequenceParser.maximumPendingSequenceBytes + 10)
+        + [UInt8](repeating: 0x41, count: 300 * 1024)
 
     // MARK: the over-large open sequence (a defect before this PR: exported empty)
 
     @Test func anOverLargeOpenSequenceIsNotExported() {
         let owner = Self.make()
         owner.feed(byteArray: Self.overLarge)
-        #expect(owner.pendingParserBytes == nil)
-        #expect(owner.exportState() == nil, "exportState must wait while the open sequence is not recorded")
-        #expect(owner.exportForStreaming() == nil, "exportForStreaming must wait while the open sequence is not recorded")
+        #expect(owner.hasPendingSequence)
+        #expect(owner.exportState() == nil, "exportState must wait while a sequence is open")
+        #expect(owner.exportForStreaming() == nil, "exportForStreaming must wait while a sequence is open")
     }
 
     @Test func theSequenceEndingEndsTheWait() throws {
@@ -109,25 +110,13 @@ final class ExportRefusalTests {
     @Test func theGuardIsTheFirstStatementOfTheOneExport() throws {
         #expect(try Self.firstStatement(in: "TerminalStateSnapshot.swift",
                                         after: "func exportState(skippingHistory: Bool) -> TerminalStateSnapshot? {")
-                == "guard let pending = pendingParserBytes else { return nil }")
+                == "guard !hasPendingSequence else { return nil }")
         #expect(try Self.firstStatement(in: "TerminalStateSnapshot.swift",
                                         after: "public func exportState() -> TerminalStateSnapshot? {")
                 == "exportState(skippingHistory: false)")
         #expect(try Self.firstStatement(in: "TerminalHistoryStreaming.swift",
                                         after: "public func exportForStreaming() -> TerminalStreamingExport? {")
                 == "guard let screen = exportState(skippingHistory: true) else { return nil }")
-    }
-
-    /// No replication file swallows the nil with a default.
-    @Test func noReplicationFileDefaultsTheNil() throws {
-        let swallow = try NSRegularExpression(pattern: #"pendingParserBytes\s*\?\?"#)
-        for file in ReplicationSourceScanTests.replicationFiles {
-            for (n, line) in try Self.source(file).enumerated()
-            where line.trimmingCharacters(in: .whitespaces).hasPrefix("//") == false
-                && swallow.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
-                Issue.record("\(file):\(n + 1) defaults a nil pendingParserBytes: \(line)")
-            }
-        }
     }
 
     /// The doc comments use the one word "wait" and say what ends it.
@@ -137,7 +126,7 @@ final class ExportRefusalTests {
                                                 above: "public func exportState() -> TerminalStateSnapshot? {")),
             ("exportForStreaming", try Self.docComment(in: "TerminalHistoryStreaming.swift",
                                                        above: "public func exportForStreaming() -> TerminalStreamingExport? {")),
-            ("pendingParserBytes", try Self.docComment(in: "Terminal.swift", above: "public var pendingParserBytes: [UInt8]? {")),
+            ("hasPendingSequence", try Self.docComment(in: "Terminal.swift", above: "public var hasPendingSequence: Bool {")),
         ]
         for (name, doc) in docs {
             #expect(doc.contains("wait"), "\(name): \(doc)")

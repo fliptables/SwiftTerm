@@ -58,8 +58,9 @@ public struct TerminalStateSnapshot: Equatable, Sendable {
     public var rows: Int { modes.rows }
     /// Whether the alternate screen was active.
     public var alternateScreenActive: Bool { modes.altActive }
-    /// Bytes of a sequence the parser had only partly read. The importer feeds
-    /// them last, so its parser resumes in the same state.
+    /// A format v1 field, always empty: a snapshot is taken only at ground
+    /// (IT-2001 D4, export only at ground). The importer still feeds it if a
+    /// v1 snapshot carries bytes. Drop in v2.
     public internal(set) var pendingParserBytes: [UInt8]
     /// Cells whose payload was dropped because it was not a `String`.
     public internal(set) var droppedPayloadCount: Int
@@ -236,16 +237,17 @@ extension Terminal.TerminalConformance: Equatable {}
 extension Terminal {
     /// Exports the emulator state. Call under `terminalLock`, between feeds.
     ///
-    /// Returns `nil`, reading and changing nothing, when ``pendingParserBytes``
-    /// is `nil`: the parser is inside a sequence it has not recorded, and a
-    /// snapshot taken now would put a replica's parser in ground. The caller
-    /// must wait; the next feed that returns the parser to ground ends the wait.
+    /// Returns `nil`, reading and changing nothing, while
+    /// ``hasPendingSequence`` is true: the parser is inside a sequence, or a
+    /// UTF-8 character is cut, and a snapshot taken now would put a replica's
+    /// parser in ground. The caller must wait; the next feed that returns the
+    /// parser to ground ends the wait.
     public func exportState() -> TerminalStateSnapshot? {
         exportState(skippingHistory: false)
     }
 
     func exportState(skippingHistory: Bool) -> TerminalStateSnapshot? {
-        guard let pending = pendingParserBytes else { return nil }
+        guard !hasPendingSequence else { return nil }
         var dropped = 0
         let modes = TerminalModesImage(
             cols: cols, rows: rows,
@@ -307,7 +309,7 @@ extension Terminal {
         let altImage = Terminal.bufferImage(replicationAltBuffer, dropped: &dropped, skippingHistory: skippingHistory)
         return TerminalStateSnapshot(
             modes: modes, normal: normalImage, alt: altImage,
-            pendingParserBytes: pending,
+            pendingParserBytes: [],
             droppedPayloadCount: dropped)
     }
 

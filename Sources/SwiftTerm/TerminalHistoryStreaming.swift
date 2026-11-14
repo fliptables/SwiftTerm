@@ -92,7 +92,7 @@ extension Terminal {
     /// packed copy of each history line.
     ///
     /// Returns `nil`, like ``exportState()`` and from the same guard, when
-    /// ``pendingParserBytes`` is `nil`: the caller must wait; the next feed that
+    /// ``hasPendingSequence`` is true: the caller must wait; the next feed that
     /// returns the parser to ground ends the wait.
     public func exportForStreaming() -> TerminalStreamingExport? {
         guard let screen = exportState(skippingHistory: true) else { return nil }

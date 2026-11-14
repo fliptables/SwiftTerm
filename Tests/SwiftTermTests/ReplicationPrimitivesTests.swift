@@ -2,9 +2,9 @@
 import Testing
 @testable import SwiftTerm
 
-/// The four additions a replicating host needs: `HeadlessTerminal.onOutput`,
-/// `Terminal.respondsToQueries`, `Terminal.hasPendingSequence` and
-/// `Terminal.pendingParserBytes`.
+/// The additions a replicating host needs: `HeadlessTerminal.onOutput`,
+/// `Terminal.respondsToQueries` and `Terminal.hasPendingSequence` (with the
+/// optional exports: export only at ground).
 final class ReplicationPrimitivesTests {
     private final class Capture: TerminalDelegate {
         var sent: [UInt8] = []
@@ -15,7 +15,6 @@ final class ReplicationPrimitivesTests {
         let capture = Capture()
         let terminal = Terminal(delegate: capture, options: TerminalOptions(cols: 40, rows: 10))
         terminal.respondsToQueries = respondsToQueries
-        terminal.recordsPendingParserBytes = true
         return (terminal, capture)
     }
 
@@ -69,57 +68,52 @@ final class ReplicationPrimitivesTests {
         #expect(capture.sent == bytes("\u{1b}[<0;3;4M"))
     }
 
-    // MARK: hasPendingSequence / pendingParserBytes
+    // MARK: hasPendingSequence (export only at ground)
 
     @Test func groundStateHasNothingPending() {
         let (terminal, _) = makeTerminal()
         terminal.feed(text: "hello \u{1b}[31mworld\u{1b}[0m\r\n")
         #expect(!terminal.hasPendingSequence)
-        #expect(terminal.pendingParserBytes == [])
+        #expect(terminal.exportState() != nil)
     }
 
-    @Test func everyCutInsideACsiKeepsTheBytesVerbatim() {
+    @Test func everyCutInsideACsiWaits() {
         let sequence = bytes("\u{1b}[38;2;10;20;30m")
         for cut in 1..<sequence.count {
             let (terminal, _) = makeTerminal()
             terminal.feed(byteArray: bytes("ab"))
             terminal.feed(byteArray: Array(sequence[..<cut]))
-            #expect(terminal.hasPendingSequence)
-            #expect(terminal.pendingParserBytes == Array(sequence[..<cut]))
+            #expect(terminal.hasPendingSequence, "cut \(cut)")
+            #expect(terminal.exportState() == nil, "cut \(cut)")
         }
     }
 
-    @Test func aSequenceSplitOverManyFeedsAccumulates() {
+    @Test func aSequenceSplitOverManyFeedsWaitsUntilItEnds() {
         let sequence = bytes("\u{1b}]2;a long window title\u{07}")
         let (terminal, _) = makeTerminal()
         for byte in sequence.dropLast() {
             terminal.feed(byteArray: [byte])
+            #expect(terminal.hasPendingSequence)
         }
-        #expect(terminal.pendingParserBytes == Array(sequence.dropLast()))
         terminal.feed(byteArray: [sequence.last!])
         #expect(!terminal.hasPendingSequence)
         #expect(terminal.terminalTitle == "a long window title")
+        #expect(terminal.exportState() != nil)
     }
 
-    @Test func aC0ExecutedInsideASequenceIsLeftOut() {
+    @Test func aC0ExecutedInsideASequenceRunsAndTheSequenceStaysOpen() {
         let (terminal, _) = makeTerminal()
         terminal.feed(byteArray: bytes("\u{1b}[3\n"))
         #expect(terminal.buffer.y == 1)
-        #expect(terminal.pendingParserBytes == bytes("\u{1b}[3"))
+        #expect(terminal.hasPendingSequence)
     }
 
-    @Test func aNewEscapeAbandonsTheOpenSequence() {
-        let (terminal, _) = makeTerminal()
-        terminal.feed(byteArray: bytes("\u{1b}[12;"))
-        terminal.feed(byteArray: bytes("\u{1b}[4"))
-        #expect(terminal.pendingParserBytes == bytes("\u{1b}[4"))
-    }
-
-    @Test func aStringEndedByEscapeKeepsOnlyTheEscape() {
+    @Test func aStringEndedByEscapeIsDispatchedAndTheEscapeIsOpen() {
         let (terminal, _) = makeTerminal()
         terminal.feed(byteArray: bytes("\u{1b}]2;title\u{1b}"))
         #expect(terminal.terminalTitle == "title")
-        #expect(terminal.pendingParserBytes == [0x1b])
+        #expect(terminal.hasPendingSequence)
+        #expect(terminal.exportState() == nil)
     }
 
     @Test func aPartialUTF8CharacterIsPending() {
@@ -127,58 +121,21 @@ final class ReplicationPrimitivesTests {
         let e = bytes("é")
         terminal.feed(byteArray: [e[0]])
         #expect(terminal.hasPendingSequence)
-        #expect(terminal.pendingParserBytes == [e[0]])
+        #expect(terminal.exportState() == nil)
         terminal.feed(byteArray: [e[1]])
         #expect(!terminal.hasPendingSequence)
     }
 
-    @Test func anOversizedOpenStringReportsNil() {
+    /// An open string of any size is one more wait; there is no bound.
+    @Test func anOversizedOpenStringWaitsLikeAnyOther() {
         let (terminal, _) = makeTerminal()
-        let payload = [UInt8](repeating: 0x41, count: EscapeSequenceParser.maximumPendingSequenceBytes + 10)
+        let payload = [UInt8](repeating: 0x41, count: 300 * 1024)
         terminal.feed(byteArray: bytes("\u{1b}]52;c;") + payload)
         #expect(terminal.hasPendingSequence)
-        #expect(terminal.pendingParserBytes == nil)
+        #expect(terminal.exportState() == nil)
         terminal.feed(byteArray: [0x07])
         #expect(!terminal.hasPendingSequence)
-        #expect(terminal.pendingParserBytes == [])
-    }
-
-    /// The property a snapshot relies on: a second parser fed the pending
-    /// bytes and then the rest of the stream ends in the same state as the
-    /// parser that read the whole stream, at every cut point.
-    @Test func replayingThePendingBytesResumesTheSameParse() {
-        let stream = bytes("x\u{1b}[1;31mR\u{1b}]2;tït\u{1b}\\\u{1b}P$qm\u{1b}\\é\u{1b}[?25l\u{1b}[5;7Hz")
-        var stCuts = 0
-        defer { #expect(stCuts == 2) }
-        for cut in 0...stream.count {
-            let (whole, _) = makeTerminal()
-            whole.feed(byteArray: Array(stream[..<cut]))
-            let pending = whole.pendingParserBytes!
-            whole.feed(byteArray: Array(stream[cut...]))
-
-            // The replica starts from the whole terminal's state at the cut,
-            // which here is the cut prefix minus its pending bytes.
-            let (replica, capture) = makeTerminal(respondsToQueries: false)
-            replica.feed(byteArray: Array(stream[..<(cut - pending.count)]))
-            // A cut between the ESC and the backslash of an ST: the whole
-            // terminal already dispatched the string at the ESC, so the
-            // prefix without the pending ESC is not its state. The snapshot
-            // tests cover that cut with the exported state.
-            if replica.hasPendingSequence {
-                stCuts += 1
-                continue
-            }
-            replica.feed(byteArray: pending)
-            replica.feed(byteArray: Array(stream[cut...]))
-            #expect(capture.sent.isEmpty)
-            #expect(replica.terminalTitle == whole.terminalTitle, "cut \(cut)")
-            #expect(replica.buffer.x == whole.buffer.x && replica.buffer.y == whole.buffer.y, "cut \(cut)")
-            #expect(replica.cursorHidden == whole.cursorHidden, "cut \(cut)")
-            for col in 0..<6 {
-                #expect(replica.getCharData(col: col, row: 0)?.attribute == whole.getCharData(col: col, row: 0)?.attribute, "cut \(cut) col \(col)")
-                #expect(replica.getText(col: col, row: 0) == whole.getText(col: col, row: 0), "cut \(cut) col \(col)")
-            }
-        }
+        #expect(terminal.exportState() != nil)
     }
 
     // MARK: the DEC 2026 valve under the host's control

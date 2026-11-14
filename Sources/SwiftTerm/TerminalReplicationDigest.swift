@@ -33,8 +33,8 @@ extension Terminal {
         "curStyleID": "storage identity of curAttr",
         "currentEraseBlankCell": "storage identity of the erase attribute",
         "currentEraseSpaceCell": "storage identity of the erase attribute",
-        "parser": "compared as pendingParserBytes",
-        "readingBuffer": "compared as pendingParserBytes",
+        "parser": "compared as hasPendingSequence and its state between feeds (export only at ground)",
+        "readingBuffer": "compared as hasPendingSequence (export only at ground)",
         "oscEventDispatcher": "observer plumbing",
         "parseDepth": "re-entrancy counter, zero between feeds",
         "hasPendingScrollNotification": "delegate notification bookkeeping",
@@ -104,7 +104,8 @@ extension Terminal {
         }
         out.append("terminal.altActive = \(isCurrentBufferAlternate)")
         out.append("terminal.activeHyperlink = \(describeActiveHyperlink())")
-        out.append("terminal.pendingParserBytes = \(pendingParserBytes.map { $0.map(String.init).joined(separator: ",") } ?? "overflow")")
+        out.append("terminal.hasPendingSequence = \(hasPendingSequence)")
+        out.append("terminal.parser = \(replicationParserState.joined(separator: "; "))")
         // Attributes are numbered in order of first appearance and listed once at the end, so a
         // cell costs a table lookup instead of a reflective description; two states with equal
         // cells number their attributes identically.

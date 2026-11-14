@@ -4,9 +4,78 @@ Branch `2001-upstream-merge-b`, fork PR #6. Merge of upstream `d4f52faaa` into t
 `scape-selection-api` at `7ec59163a`; merge commit `e768bfa77`. The plan (rev 3) asks for this
 record in section 6, item 6. Line numbers are at `5450d92` unless a line says otherwise.
 
-Sections are added as the work lands. Still to come: the D4 performance ruling and its tables,
-format v2 and the census, P3's hand audit, C3's list of state changes with no byte, and the Linux
-baseline.
+Sections are added as the work lands. Still to come: the whole-fork performance comparison against
+upstream, the inventory of fork code by path, format v2 and the census, C3's list of state changes
+with no byte, and the Linux baseline.
+
+## D4: export only at ground (lead 14's ruling (B))
+
+**What is built.** `Sources/SwiftTerm/EscapeSequenceParser.swift` is upstream `d4f52faaa`'s file, byte
+for byte. It was restored with `git checkout d4f52faaa -- <path>`, and
+`git diff d4f52faaa -- <path>` is empty. `ExportAtGroundTests.theParserFileIsUpstreams` pins the
+file's SHA-256 (`986e60d2…6045`).
+
+`exportState()` and `exportForStreaming()` return nil ("wait") whenever `hasPendingSequence` is
+true, meaning the parser is not at ground or a cut UTF-8 character is held. There is one guard. It
+has no size bound, scans nothing and retains nothing. At ground, the snapshot's pending field is
+empty.
+
+These were removed:
+- the sequence-boundary hook, its locals and its record
+- the flag `Terminal.recordsPendingParserBytes`
+- `Terminal.pendingParserBytes` (public, fork-only)
+
+`TerminalStateSnapshot.pendingParserBytes` stays as a format v1 field. It is always empty, and it
+is dropped in v2.
+
+**Why.** The hook failed the 1.5% bar even with the flag off. Measured by instructions against
+upstream's loop, in both orders:
+
+- `hardening_osc_short_chunked`: +14.8%
+- `hardening_osc_bounded_chunked`: +5.8%
+- every other case: +0.3 to +1.2%
+
+A one-change-at-a-time test located the cost in the in-loop call site, even though that call is
+never taken. Removing only that call left +0.4%. Making it `@inline(never)` still cost +14.6%; making
+both calls `@inline(never)` cost +2.6%.
+
+Nash ruled that the parse loop carries no fork code.
+
+**The cost, stated.** An attach or resync waits while a sequence is open. That covers an image
+transfer, a stalled link, or binary output that leaves the parser inside a string. Before this PR,
+the export with an over-large open sequence exported an empty pending field: a defect in fork-only
+code (`ba15b70`, `a3dab0d`). Now that case is just one more wait.
+
+**Designs not taken.** The lead withdrew (C); (S) is the recorded upgrade over (B).
+- (C) was to retain the raw bytes and re-scan them at export. It is struck.
+- (S) is to serialize the parser's fields at export, with a parser census and an every-cut oracle.
+  It lands in format v2, and only if #1289's measured waits show that export mid-sequence is needed
+  and the engine stays.
+- For IT-2015's record: if (B)'s wait is ever measured bad, the FIRST upgrade to consider is
+  libghostty's continuation design:
+  - one check per feed call, at the wrapper;
+  - a search of that one feed for the last ESC;
+  - canonicalising only at export;
+  - off by default.
+
+  (S) is second.
+
+**Plan §2 corrected.** `exportState` and `exportForStreaming` are fork-only (`ba15b70`, `a3dab0d`),
+and they now return an optional. The plan's "same shape" table is wrong on both counts.
+
+**Owed in Scape (#1289, session host `tether-1149-s23` @ 46faf0eff), not in this PR.** Two product
+sites read the removed symbol:
+
+    Headless/Runtime/Sessions/HostSession.swift:394
+        guard terminal.pendingParserBytes != nil else { throw SessionAttachError.snapshotUnavailable }
+    Headless/Runtime/Sessions/HostSession.swift:437
+        guard terminal.pendingParserBytes != nil else { throw SessionAttachError.snapshotUnavailable }
+
+Both switch to `exportState() == nil` (or `hasPendingSequence`) at the pin bump. #1289's gate also
+owes three things:
+- a counter of export waits, and the longest wait;
+- one test that an attach during an open sequence shows a waiting state;
+- that the same attach blocks nothing and is served at the next ground.
 
 ## Assertion audit (plan section 8, last row)
 

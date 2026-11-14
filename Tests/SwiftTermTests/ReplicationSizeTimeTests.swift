@@ -15,7 +15,6 @@ final class ReplicationSizeTimeTests {
 
     @Test func screenPartAndHistoryChunksAtTwoHundredBySixty() throws {
         let owner = Terminal(delegate: Sink(), options: TerminalOptions(cols: 200, rows: 60, scrollback: 10_000))
-        owner.recordsPendingParserBytes = true
         var text = ""
         for n in 0..<10_060 {
             text += "\u{1b}[\(31 + n % 7)m\(String(format: "%05d", n))\u{1b}[0m "
