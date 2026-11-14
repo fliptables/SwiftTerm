@@ -967,3 +967,98 @@ instruction diff of the two binaries. Result:
 **tabStopWidth after the drop.** Import reads it only through the read-only accessor
 `replicationTabStopWidth`, to BUILD the replica's buffers (construction). It is not carried. Fix
 `53a1884`, found by the full suite's ReplicationSourceScanTests at `bfdcfc2`.
+
+## Decode validation (builder #10; red `04aff37`, fix on top)
+
+**The defect** (keystone 17's whole read). `TerminalStateSnapshot.init(encoded:)` and
+`TerminalHistoryChunk.init(encoded:)` accepted values that import assigns unchecked. A corrupted or
+truncated stream between the daemon and the app could then trap at import (an arena
+`preconditionFailure`), trap at the next byte fed (an index outside the grid), or allocate
+gigabytes. **The rule now:** such a stream fails decode with `TerminalStateSnapshotError`. Import
+stays non-throwing.
+
+**The shape.** One `validate()` per type runs at the end of its `init(encoded:)`, before import
+allocates anything. The cell checks run in `LineImage`'s decode, so snapshots and history chunks
+share them. Each check is an invariant the exporter guarantees and import relies on. A check is
+kept only if breaking it would crash, trap or allocate. Every bound was tried against live exports
+(`liveExportsInEdgeStatesStillDecode`, `resizeCutsStillDecode` with 6 sizes smaller and larger on
+both buffers, whole + screen part + chunks, and `wideLinesAndALongScrollbackStillDecode` with 500
+columns and 6000 lines into a 5000-line scrollback). Six invariants were relaxed to what those
+exports showed (rows marked RELAXED). Each relaxed check has a comment so nobody tightens it later.
+
+| Field | Bound after decode | Why (the crash, trap or allocation) |
+|---|---|---|
+| gCharsets.count | == 4 | Terminal indexes G0-G3 |
+| gLevel | < 4 | indexes gCharsets |
+| active buffer cols/rows | == modes cols/rows | RELAXED for the hidden buffer: under the alt screen a resize left normal at 30x8 while modes said 45x14. The hidden buffer gets cols, rows > 0 and every other check uses its own grid |
+| tabStops.count | >= cols | a TAB reads tabStops[x]. A fresh buffer holds cols + 1 (31 at 30 cols); a resized one holds exactly cols |
+| lines held | lines.count + pendingHistoryLines >= rows, or 0 on the INACTIVE buffer only | RELAXED: the screen part of an alt buffer grown by a resize held 8 lines for 14 rows (yBase 6 left as history). An alternate buffer that was never activated exports 0 lines |
+| line cols | >= buffer cols | RELAXED from ==: a resize without reflow (alt, no scrollback) keeps wider lines (widths [3, 30] on a 3x20 alt). A NARROWER line trips Buffer.resize's post-condition (`fatalError("A resized line is shorter than the buffer width")`) |
+| x, savedX | 0...cols | the cursor indexes the line |
+| y | 0..<rows | same |
+| savedY | \|savedY\| <= Int32.max | RELAXED from 0..<rows: observed -3 after a resize to 20x5. Restore clamps it (Terminal.swift:5287). Its other readers do plain arithmetic: Terminal.swift:1492/1508 `savedY - y`; Buffer.swift:1057/1151 `savedY - amountToTrim`; :1507 `savedY - countRemovedSoFar`; :1706 `savedY + linesToAdd`. The other operands are < 2^25, so Int.min and Int.max would overflow and anything inside Int32 cannot |
+| scrollTop, scrollBottom | 0 <= top <= bottom < rows | region indexing |
+| marginLeft, marginRight | 0 <= left <= right < cols | same |
+| yBase, yDisp | 0...lines.count | RELAXED from <= lines.count - rows: an alt buffer grown by a resize had lines 14, rows 14, yBase 6. A negative value traps: CircularList indexes (start + i) % capacity |
+| linesTop | 0...2^62 | it counts every line ever trimmed, so an honest value is not held to Int32. It is incremented (Terminal.swift:8761, :8893, importHistoryChunk) and added to row offsets (TerminalContentSnapshot.swift:565-576) |
+| scrollback | <= maximumScrollback (2^24) | import sets the line list's capacity: one slot per line (CircularList.swift:336) |
+| lineCapacity | rows <= cap <= (scrollback ?? 0) + 65535, and >= lines.count | same |
+| Σ line cols, both buffers | <= maximumCells (2^26, 512 MiB at 8 B per PackedCell) | import allocates each line's own width (BufferLine.swift:259). Without it, ~1 MB of 65535 x 65535 near-empty lines would allocate ~34 GB |
+| cell code | 0, or a valid Unicode scalar | arena.pack fails, then preconditionFailure (TerminalStateSnapshot.swift:656-658) |
+| grapheme scalars | each a valid scalar, checked before truncation to UInt32 | same |
+| cell widthState | 0...3 | an invalid one skips the fast path and the general pack returns nil, then preconditionFailure |
+| semantic mark column | \|column\| <= Int32.max | a reflow moves it by plain arithmetic (BufferLine.swift:980) |
+| chunk bufferCols, bufferRows | > 0 | grid identity |
+| chunk lines | non-empty; each line cols >= bufferCols; Σ cols <= maximumCells | import builds every chunk line before trimming any. A wider line is honest (as above); importHistoryChunk refuses a chunk whose grid differs from the replica's own |
+| chunk prompt row | < lines.count | already checked; now in validate() |
+
+**Decoded integers that need no bound** (Lloyd's sweep; each is next used without overflowing
+arithmetic or unchecked indexing): kitty flags and stacks (bit operations; engine cap 16, decode
+1024), saved private mode keys (dictionary keys), palette keys (import guards `index <
+ansiColors.count`), reported DEC modes (set membership), attributeChangeExtent and program-status
+progress (formatted into replies only), semanticGroupCounter (`&+=`, Buffer.swift:489), mark and
+continuation groups (compared only), semanticPromptStartRow (import guards `0..<count`),
+pendingHistoryLines (<= lineCapacity at decode), the chunk's index and count (index < count;
+neither is used in arithmetic), droppedPayloadCount (reported only), cell width (Int8 at decode).
+
+**Decode allocates O(bytes) only.** `SnapshotReader.remaining` bounds every byte-derived count
+before its `reserveCapacity` or loop: the attribute and payload tables, the lines of a buffer and
+of a chunk, tab stops (remaining x 8), the cells of a line, the title stacks, the marks of a line,
+and the scalars of a grapheme. The bug this removed: `LineImage` reserved cells by its claimed cols
+(up to 65535), so 65535 lines of ~13 bytes would have reserved ~200 GB inside decode, before any
+check. The minimum bytes per counted unit, from the encode sites in Coding.swift: a cell >= 1
+(asciiRun is a flag, a count, then one byte per cell; any other cell is a flag plus a code varint,
+>= 2); an attribute >= 5; a line >= 11; tab stops, 1 byte per 8; a scalar >= 1 (varint); a mark
+>= 3; a title or payload string >= 1 (its length varint). No run form stands for several cells per
+byte.
+
+**Caps that were wrong for honest state** (same class as the 4096 title cap):
+- **Title and icon stacks.** Upstream pushes on CSI 22 ; 0 t with no cap (Terminal.swift:5790-5792).
+  The 4096 cap at decode would have made every later snapshot fail. The stacks are now bounded by
+  the bytes left. Red: `aTitleStackDeeperThan4096Decodes`.
+- **Graphemes.** Feeding "e" + 100 x U+0301 and decoding the export failed with
+  `.invalid("grapheme")` (observed at `04aff37`, cap 64). Now bounded by the bytes left. Red:
+  `aCellWithAHundredCombiningMarksDecodes`.
+- **Semantic marks.** A line holds one mark per kind, but a reflow joins the marks of the lines it
+  joins (BufferLine.swift:996-1001). The 64 cap is replaced by the bytes left.
+
+**P3 limitation (host).** A host must keep scrollback <= `TerminalStateSnapshot.maximumScrollback`
+(2^24) and (scrollback + rows) x cols <= `maximumCells` (2^26). Past either, its snapshots fail to
+decode (an error, never a crash). Export does not refuse them.
+
+**Flag-only (no change):**
+- renderMode: an unknown code maps silently to `.single` (Coding:722).
+- `arena.intern(attribute:) ?? 0`: a full style table falls back to the default attribute.
+- A semantic content code >= 7 maps silently to `.none` (it is not a trap, so it is not checked).
+- Digest non-injectivity (P3):
+  - **Fixed** (one line, every test green): `DigestDescriber.describe` now quotes strings, so
+    `["a, b"]` vs `["a", "b"]` and `"nil"` vs nil describe differently. The census changed with
+    it: CENSUS carried=105 corpus=57 hand=48 (was hand=49). The corpus now covers
+    `terminalIconStack`, because a pushed empty title (`[""]`) used to describe the same as `[]`.
+    Its hand row is deleted.
+  - **Still open:** a cell payload target containing '/' or '|' (TerminalReplicationDigest.swift:265-268).
+  - **Still open:** a class nested in a carried struct prints as its type name.
+
+**macOS suite at the fix:** 2164 tests in 208 suites, 5 issues, all load-bound: `endCallbackDoesNotOverlapFinalParse` (3) and `testSynchronizedOutputTimeoutFromBackgroundFeed…` (2). XCTest 150/150. CENSUS carried=105 corpus=57 hand=48. **New to the load-bound list:** `ProgressReportTimeoutTests.shorteningTheTimeoutRearmsAWaitInFlight`. In the first loaded run (`run-b8-full-b10-fix4.log`) it failed with `ProgressReportTimeoutTests.swift:62:9: Expectation failed: progressBar(of: view)?.isHidden == false`. Alone it passes 3/3, as do the other load-bound tests and `theDefaultOutlastsAShortSilence` (`it2001-b/b10-alone.txt`).
+
+**Feed path at the fix** (`87692c1`, release SwiftTermProfile, `Tools/feed-path-disasm.py`): every section is the same as at `bfdcfc2` (`it2001-b/b10-disasm.log`), so the not-dirty one-byte path is still **47 = 47**. The only difference from U is the known D7 `$defer` (37 vs 43, the dirty-feed gate).
