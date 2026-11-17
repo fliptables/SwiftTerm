@@ -177,13 +177,20 @@ private final class LocalProcessTerminalViewProcessAdapter:
 
     func processFailedToStart(_ source: LocalProcess, error: LocalProcessError) {
         let handler = failureHandler
-        Task { @MainActor in handler(error) }
+        // IT-2141: a main-queue block, not a Swift task (see
+        // FrameDriverSignal.deliverOnMainQueue): it must arrive while the
+        // cooperative pool is starved.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { handler(error) }
+        }
     }
 
     func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
         let handler = terminationHandler
-        Task { @MainActor in
-            handler(exitCode)
+        // IT-2141: a main-queue block, not a Swift task (see
+        // FrameDriverSignal.deliverOnMainQueue).
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { handler(exitCode) }
         }
     }
 
