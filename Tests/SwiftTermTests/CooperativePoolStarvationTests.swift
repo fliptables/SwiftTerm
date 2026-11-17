@@ -137,6 +137,7 @@ final class CooperativePoolStarvationTests: XCTestCase {
 }
 
 private struct PoolNotStarved: Error {}
+private struct CatDidNotStart: Error {}
 
 /// Occupies every thread of the cooperative pool with tasks that block on a
 /// semaphore, at each priority, until `release()`.
@@ -173,9 +174,15 @@ private final class PoolStarver: @unchecked Sendable {
         guard !released else { return }
         released = true
         for _ in 0..<total { gate.signal() }
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = Date().addingTimeInterval(60)
         while finished.withLock({ $0 }) < total, Date() < deadline {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        // A blocker still running would starve the next test's pool: fail
+        // here, by name, rather than leave a dirty pool behind silently.
+        let done = finished.withLock { $0 }
+        if done < total {
+            XCTFail("the pool did not drain: \(done) of \(total) blockers finished within 60 s of release")
         }
     }
 }
@@ -210,12 +217,15 @@ private final class ProcessHost {
         view.processDelegate = recorder
         view.startProcess(executable: "/bin/cat")
         self.view = view
-        let deadline = Date().addingTimeInterval(5)
+        let deadline = Date().addingTimeInterval(30)
         while view.process?.running != true, Date() < deadline {
             RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
         guard view.process?.running == true else {
-            throw XCTSkip("could not start /bin/cat in a pty")
+            // A failure, never a skip: a skipped pty test would let the
+            // keystroke and exit hops pass the gate unexercised.
+            XCTFail("could not start /bin/cat in a pty within 30 s")
+            throw CatDidNotStart()
         }
         return view
     }
