@@ -102,16 +102,24 @@ final class CooperativePoolStarvationTests: XCTestCase {
         // stops rising once the pool is full.
         var last = -1
         var stableSince = Date()
+        var plateaued = false
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
             _ = spinMain(until: { false }, timeout: 0.05)
             let now = starver.started.withLock { $0 }
             if now != last { last = now; stableSince = Date() }
-            if now > 0, Date().timeIntervalSince(stableSince) > 0.5 { break }
+            if now > 0, Date().timeIntervalSince(stableSince) > 0.5 { plateaued = true; break }
+        }
+        guard plateaued else {
+            starver.release()
+            XCTFail("the blockers never settled within 10 s (\(last) running); this test proves nothing", file: file, line: line)
+            throw PoolNotStarved()
         }
         // The proof: a fresh task at the highest and the lowest priority must
-        // not run while the pool is starved.
-        let probeRan = Locked(false)
+        // not run while the pool is starved. The probes stay queued; release()
+        // checks them again, so a pool that was only slow (not starved) when
+        // this check ran fails the test instead of passing it.
+        let probeRan = starver.probeRan
         for priority in [TaskPriority.high, .background] {
             Task.detached(priority: priority) { probeRan.withLock { $0 = true } }
         }
@@ -144,6 +152,8 @@ private struct CatDidNotStart: Error {}
 private final class PoolStarver: @unchecked Sendable {
     let started = Locked(0)
     let finished = Locked(0)
+    /// Set by a probe task. It must stay false until `release()`.
+    let probeRan = Locked(false)
     private let gate = DispatchSemaphore(value: 0)
     private var total = 0
     private var released = false
@@ -173,6 +183,11 @@ private final class PoolStarver: @unchecked Sendable {
     func release() {
         guard !released else { return }
         released = true
+        // Checked before the gate opens: a probe that ran means the pool had a
+        // free thread during the test, so whatever the test saw proves nothing.
+        if probeRan.withLock({ $0 }) {
+            XCTFail("a probe task ran before release: the pool was not starved for the whole test")
+        }
         for _ in 0..<total { gate.signal() }
         let deadline = Date().addingTimeInterval(60)
         while finished.withLock({ $0 }) < total, Date() < deadline {
