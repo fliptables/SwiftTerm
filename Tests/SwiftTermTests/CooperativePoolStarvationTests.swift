@@ -76,7 +76,11 @@ final class CooperativePoolStarvationTests: XCTestCase {
         defer { starver.release() }
 
         view.startProcess(executable: "/nonexistent/it2141-exec-fails")
-        let reported = spinMain(until: { recorder.terminations.withLock { $0 } >= 1 }, timeout: 5)
+        // The view owns the process and its adapter: keep it alive while the
+        // exit is in flight.
+        let reported = withExtendedLifetime(view) {
+            spinMain(until: { recorder.terminations.withLock { $0 } >= 1 }, timeout: 5)
+        }
 
         XCTAssertTrue(reported, "the child exited while the pool was starved, but processTerminated never reached the host")
     }
