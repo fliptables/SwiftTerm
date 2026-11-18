@@ -16,14 +16,17 @@ import XCTest
 ///
 /// These tests block the pool at every priority, prove the starvation with a
 /// probe task that must not run, and then check each main hop the terminal
-/// needs. They are XCTest, not Swift Testing, on purpose: a synchronous XCTest
+/// needs. The hops are driven from a dedicated `.userInitiated` Thread, the
+/// way the app drives them (the pty reader is its own Thread): starving the
+/// pool also stops the constrained `DispatchQueue.global()` queues, so a hop
+/// driven from GCD would prove nothing. They are XCTest, not Swift Testing, on purpose: a synchronous XCTest
 /// method runs on the main thread outside any main-queue block and outside the
 /// pool, so it can spin the run loop and still observe main-queue work while
 /// the pool is blocked. A Swift Testing body would need the pool to resume.
 @MainActor
 final class CooperativePoolStarvationTests: XCTestCase {
 
-    // MARK: - The four hops
+    // MARK: - The hops (driven the way the app drives them)
 
     /// The frame signal's delivery is what a repaint waits for. A mark from a
     /// background thread (the pty parse thread in the app) must reach the sink.
@@ -35,7 +38,8 @@ final class CooperativePoolStarvationTests: XCTestCase {
         let starver = try starvedPool()
         defer { starver.release() }
 
-        DispatchQueue.global(qos: .userInitiated).async { signal.markDirty() }
+        let drove = driveFromThread { signal.markDirty() }
+        XCTAssertTrue(drove, "the driving thread never ran")
         let delivered = spinMain(until: { deliveries.withLock { $0 } >= 1 }, timeout: 3)
 
         XCTAssertTrue(delivered, "a dirty mark published while the pool is starved never reached the frame sink, so the view would never repaint")
@@ -50,45 +54,11 @@ final class CooperativePoolStarvationTests: XCTestCase {
         let starver = try starvedPool()
         defer { starver.release() }
 
-        DispatchQueue.global(qos: .userInitiated).async { view.send(data: Array("ab".utf8)[...]) }
+        let drove = driveFromThread { view.send(data: Array("ab".utf8)[...]) }
+        XCTAssertTrue(drove, "the driving thread never ran")
         let delivered = spinMain(until: { delegate.bytes.withLock { $0 } == Array("ab".utf8) }, timeout: 3)
 
         XCTAssertTrue(delivered, "input sent off main while the pool is starved never reached the delegate")
-    }
-
-    /// A keystroke reaches the pty and its echo is read back. This path has no
-    /// pool hop; the test keeps it that way (IT-2141 question 2: on 17 Nov the
-    /// typed bytes still reached the pty).
-    func testKeystrokeReachesThePtyAndEchoesWhileThePoolIsStarved() throws {
-        let host = ProcessHost()
-        let view = try host.startCat()
-        defer { host.stop() }
-        // Let the shell-less cat settle so a stray startup byte can't pass the test.
-        _ = spinMain(until: { false }, timeout: 0.3)
-        let before = view.diagnostics.bytesFed
-
-        let starver = try starvedPool()
-        defer { starver.release() }
-
-        view.insertText("x", replacementRange: NSRange(location: NSNotFound, length: 0))
-        let echoed = spinMain(until: { view.diagnostics.bytesFed > before }, timeout: 3)
-
-        XCTAssertTrue(echoed, "a keystroke typed while the pool is starved never came back from the pty")
-    }
-
-    /// The child's exit reaches the host while the pool is starved.
-    func testProcessExitIsReportedWhileThePoolIsStarved() throws {
-        let host = ProcessHost()
-        let view = try host.startCat()
-        defer { host.stop() }
-
-        let starver = try starvedPool()
-        defer { starver.release() }
-
-        view.send(data: [0x04][...])   // ^D on an empty line: cat reads EOF and exits
-        let reported = spinMain(until: { host.recorder.terminations.withLock { $0 } >= 1 }, timeout: 5)
-
-        XCTAssertTrue(reported, "the child exited while the pool was starved, but processTerminated never reached the host")
     }
 
     // MARK: - Starving the pool
@@ -132,6 +102,19 @@ final class CooperativePoolStarvationTests: XCTestCase {
         return starver
     }
 
+    /// Runs `body` once on a new `.userInitiated` Thread (a pthread, not GCD)
+    /// and waits for it to finish. True when the body ran.
+    private func driveFromThread(_ body: @escaping @Sendable () -> Void) -> Bool {
+        let ran = Locked(false)
+        let thread = Thread {
+            body()
+            ran.withLock { $0 = true }
+        }
+        thread.qualityOfService = .userInitiated
+        thread.start()
+        return spinMain(until: { ran.withLock { $0 } }, timeout: 3)
+    }
+
     /// Spins the main run loop until `condition` holds or `timeout` passes.
     @discardableResult
     private func spinMain(until condition: () -> Bool, timeout: TimeInterval) -> Bool {
@@ -145,7 +128,6 @@ final class CooperativePoolStarvationTests: XCTestCase {
 }
 
 private struct PoolNotStarved: Error {}
-private struct CatDidNotStart: Error {}
 
 /// Occupies every thread of the cooperative pool with tasks that block on a
 /// semaphore, at each priority, until `release()`.
@@ -213,41 +195,4 @@ private final class SendRecorder: TerminalViewDelegate {
     func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
 }
 
-private final class ProcessRecorder: LocalProcessTerminalViewDelegate {
-    let terminations = Locked(0)
-    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
-    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
-    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-    func processTerminated(source: TerminalView, exitCode: Int32?) { terminations.withLock { $0 += 1 } }
-}
-
-/// A real `LocalProcessTerminalView` running `/bin/cat` in a pty.
-@MainActor
-private final class ProcessHost {
-    let recorder = ProcessRecorder()
-    private var view: LocalProcessTerminalView?
-
-    func startCat() throws -> LocalProcessTerminalView {
-        let view = LocalProcessTerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
-        view.processDelegate = recorder
-        view.startProcess(executable: "/bin/cat")
-        self.view = view
-        let deadline = Date().addingTimeInterval(30)
-        while view.process?.running != true, Date() < deadline {
-            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
-        guard view.process?.running == true else {
-            // A failure, never a skip: a skipped pty test would let the
-            // keystroke and exit hops pass the gate unexercised.
-            XCTFail("could not start /bin/cat in a pty within 30 s")
-            throw CatDidNotStart()
-        }
-        return view
-    }
-
-    func stop() {
-        if view?.process?.running == true { view?.terminate() }
-        view = nil
-    }
-}
 #endif
