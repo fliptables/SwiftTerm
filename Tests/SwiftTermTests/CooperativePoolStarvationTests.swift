@@ -61,6 +61,26 @@ final class CooperativePoolStarvationTests: XCTestCase {
         XCTAssertTrue(delivered, "input sent off main while the pool is starved never reached the delegate")
     }
 
+    /// The process adapter's exit callback reaches the host. The child's exec
+    /// fails, so it exits (127) at once with no pty I/O. The exit then travels
+    /// the app's own path: a process source on main, a dedicated reaper
+    /// Thread, `main.async`, then the adapter's hop to the host. None of that
+    /// needs a GCD global queue. The child starts AFTER the pool is starved,
+    /// so its exit is delivered under starvation.
+    func testProcessExitIsReportedWhileThePoolIsStarved() throws {
+        let view = LocalProcessTerminalView(frame: CGRect(x: 0, y: 0, width: 400, height: 200))
+        let recorder = ProcessRecorder()
+        view.processDelegate = recorder
+
+        let starver = try starvedPool()
+        defer { starver.release() }
+
+        view.startProcess(executable: "/nonexistent/it2141-exec-fails")
+        let reported = spinMain(until: { recorder.terminations.withLock { $0 } >= 1 }, timeout: 5)
+
+        XCTAssertTrue(reported, "the child exited while the pool was starved, but processTerminated never reached the host")
+    }
+
     // MARK: - Starving the pool
 
     /// Blocks every priority lane of the cooperative pool, then proves it.
@@ -182,6 +202,14 @@ private final class PoolStarver: @unchecked Sendable {
             XCTFail("the pool did not drain: \(done) of \(total) blockers finished within 60 s of release")
         }
     }
+}
+
+private final class ProcessRecorder: LocalProcessTerminalViewDelegate {
+    let terminations = Locked(0)
+    func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
+    func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
+    func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+    func processTerminated(source: TerminalView, exitCode: Int32?) { terminations.withLock { $0 += 1 } }
 }
 
 private final class SendRecorder: TerminalViewDelegate {
