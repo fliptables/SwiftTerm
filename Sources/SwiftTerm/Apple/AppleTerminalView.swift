@@ -1202,7 +1202,13 @@ private final class TerminalInputMainActorDelivery: Sendable {
         if Thread.isMainThread {
             MainActor.assumeIsolated { drain() }
         } else {
-            Task { @MainActor in drain() }
+            // IT-2141: a main-queue block, not a Swift task (see
+            // FrameDriverSignal.deliverOnMainQueue): off-main input must
+            // arrive while the cooperative pool is starved, and a task that
+            // never ran would leave `drainScheduled` set for good.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.drain() }
+            }
         }
     }
 

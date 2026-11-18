@@ -66,7 +66,7 @@ final class FrameDriverSignal: Sendable {
             }
         }
         if mustDeliver {
-            Task { @MainActor in sink() }
+            Self.deliverOnMainQueue(sink)
         }
     }
 
@@ -170,7 +170,19 @@ final class FrameDriverSignal: Sendable {
 
     private func schedule(_ sink: Sink?) {
         guard let sink else { return }
-        Task { @MainActor in sink() }
+        Self.deliverOnMainQueue(sink)
+    }
+
+    /// IT-2141: the delivery is a main-queue block, never a Swift task. A
+    /// `Task { @MainActor in … }` started off the main actor needs a thread
+    /// of the cooperative pool before it reaches main; when that pool was
+    /// starved (Scape, 17 Nov) the task never ran, `deliveryScheduled` stayed
+    /// set, and the view never repainted again. GCD's main queue has no such
+    /// dependency. `CooperativePoolStarvationTests` pins it.
+    private static func deliverOnMainQueue(_ sink: @escaping Sink) {
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { sink() }
+        }
     }
 }
 
